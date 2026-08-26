@@ -33,8 +33,9 @@ if ($Domain) {
 Push-Location $root
 try {
   npm run typecheck
+  # build 会把解析后的配置写进 build/server/wrangler.json，deploy 直接用它，不要再传 --config
   npm run build
-  npx wrangler deploy --config $config
+  npx wrangler deploy
 } finally {
   Pop-Location
 }
