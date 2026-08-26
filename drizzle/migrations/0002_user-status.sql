@@ -1,0 +1,1 @@
+ALTER TABLE `user` ADD `status` text DEFAULT 'active' NOT NULL;

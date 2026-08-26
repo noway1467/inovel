@@ -1,0 +1,141 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --color-brand: #2f6f52;
+  --color-accent: #a36532;
+  --color-success: #2f6f52;
+  --color-warning: #9a641f;
+  --color-danger: #b54036;
+
+  --color-background: #f3f2ed;
+  --color-foreground: #252924;
+  --color-surface: #fbfaf7;
+  --color-muted: #ebeae4;
+  --color-muted-foreground: #6c7069;
+  --color-border: #d8d8cf;
+  --color-ring: #2f6f52;
+
+  --color-primary: #2f6f52;
+  --color-primary-foreground: #ffffff;
+  --color-secondary: #e1ebe4;
+  --color-secondary-foreground: #24553f;
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+
+  --font-sans: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+  --font-serif: "Songti SC", "STSong", "SimSun", Georgia, serif;
+  --font-hei: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+}
+
+.dark {
+  --color-background: #151916;
+  --color-foreground: #e4e8e3;
+  --color-surface: #1d221e;
+  --color-muted: #272c28;
+  --color-muted-foreground: #a2aaa3;
+  --color-border: #343b35;
+  --color-ring: #75b08d;
+  --color-primary: #75b08d;
+  --color-primary-foreground: #112119;
+  --color-secondary: #26382d;
+  --color-secondary-foreground: #b8d9c5;
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+
+  html {
+    letter-spacing: 0;
+    color-scheme: light;
+  }
+
+  html.dark {
+    color-scheme: dark;
+  }
+
+  body {
+    min-width: 320px;
+    background: var(--color-background);
+    text-rendering: optimizeLegibility;
+  }
+
+  ::selection {
+    background: color-mix(in srgb, var(--color-primary) 24%, transparent);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+.app-shell {
+  background-color: var(--color-background);
+  background-image:
+    linear-gradient(color-mix(in srgb, var(--color-foreground) 2.5%, transparent) 1px, transparent 1px),
+    linear-gradient(90deg, color-mix(in srgb, var(--color-foreground) 2.5%, transparent) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+
+.paper-panel {
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  box-shadow: 0 10px 30px color-mix(in srgb, var(--color-foreground) 6%, transparent);
+}
+
+.book-cover-shell {
+  box-shadow:
+    0 1px 0 color-mix(in srgb, white 45%, transparent) inset,
+    0 8px 18px color-mix(in srgb, var(--color-foreground) 16%, transparent);
+}
+
+/* 阅读器主题作用域，与平台主题分离 */
+[data-reader-theme="paper"] {
+  --reader-bg: #fbfaf7;
+  --reader-fg: #2a2a28;
+  --reader-muted: #76746d;
+}
+
+[data-reader-theme="soft"] {
+  --reader-bg: #eef2ec;
+  --reader-fg: #2c332b;
+  --reader-muted: #6d7869;
+}
+
+[data-reader-theme="parchment"] {
+  --reader-bg: #f3ead7;
+  --reader-fg: #3d3524;
+  --reader-muted: #85775a;
+}
+
+[data-reader-theme="ink"] {
+  --reader-bg: #23262a;
+  --reader-fg: #c9ccd1;
+  --reader-muted: #8c919a;
+}
+
+[data-reader-theme="oled"] {
+  --reader-bg: #000000;
+  --reader-fg: #b9bdc4;
+  --reader-muted: #6d727a;
+}
+
+.reader-surface {
+  background: var(--reader-bg);
+  color: var(--reader-fg);
+}

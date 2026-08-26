@@ -1,0 +1,26 @@
+node_modules
+.react-router
+build
+.wrangler
+.dev.vars
+coverage
+playwright-report
+test-results
+*.log
+.DS_Store
+.idea
+.vscode
+
+# local scratch / debug artifacts
+.codex-temp
+_d2.txt
+_dump_upload.txt
+patch-rmr.sql
+rm-report.json
+
+# 真实 wrangler 配置（含域名与资源 ID），仓库只放脱敏模板
+wrangler.local.jsonc
+
+# local sample book (copyrighted, not for distribution)
+tests/*.txt
+

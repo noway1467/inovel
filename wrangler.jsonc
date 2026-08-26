@@ -1,0 +1,67 @@
+// 脱敏模板：不要在本文件填入真实域名、资源 ID 或密钥。
+// 本地开发/部署请复制为 wrangler.local.jsonc 并填入真实值（该文件已 gitignore，
+// 构建与部署会自动优先使用它）。密钥一律走 `wrangler secret put`，不要写进配置。
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "yuedu-ibook",
+  "main": "./workers/app.ts",
+  "compatibility_date": "2026-08-13",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true,
+  },
+  // 自定义域名按需填写，例如 { "pattern": "example.com", "zone_name": "example.com", "custom_domain": true }
+  "routes": [],
+  "preview_urls": false,
+  "vars": {
+    // Turnstile 站点密钥（公开值，留空则登录跳过人机验证）
+    "TURNSTILE_SITE_KEY": "",
+    // 首个管理员账号，由 ADMIN_PASSWORD secret 配合引导创建
+    "ADMIN_EMAIL": "",
+    "ADMIN_NAME": "",
+    // 部署后的站点地址，例如 https://example.com
+    "BETTER_AUTH_URL": "",
+  },
+  "d1_databases": [
+    {
+      "binding": "DB_APP",
+      "database_name": "ibook-app",
+      "database_id": "",
+      "migrations_dir": "drizzle/migrations",
+    },
+  ],
+  "r2_buckets": [
+    {
+      "binding": "R2_CONTENT",
+      "bucket_name": "ibook-content",
+      "preview_bucket_name": "ibook-content-preview",
+    },
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "QUEUE_INGEST",
+        "queue": "ibook-ingest",
+      },
+      {
+        "binding": "QUEUE_JOBS",
+        "queue": "ibook-jobs",
+      },
+    ],
+    "consumers": [
+      {
+        "queue": "ibook-ingest",
+        "max_batch_size": 1,
+        "max_concurrency": 1,
+        "max_retries": 3,
+        "dead_letter_queue": "ibook-jobs-dlq",
+      },
+      {
+        "queue": "ibook-jobs",
+        "max_batch_size": 10,
+        "max_retries": 3,
+        "dead_letter_queue": "ibook-jobs-dlq",
+      },
+    ],
+  },
+}
