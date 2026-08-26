@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Turnstile } from "@marsidev/react-turnstile";
-import { Link, useNavigate, useSearchParams } from "react-router";
+import { Link, redirect, useNavigate, useSearchParams } from "react-router";
 import type { Route } from "./+types/login";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
@@ -10,6 +10,7 @@ import { createAuth } from "~/server/auth";
 import { createDb } from "~/server/db";
 import { getRegistrationEnabled } from "~/server/settings/registration";
 import { translateAuthError } from "~/lib/auth-errors";
+import { safeRedirectTarget } from "~/lib/redirect";
 import {
   clearLocalLoginFailures,
   maxLoginFailures,
@@ -22,11 +23,17 @@ export async function loader({ request, context }: Route.LoaderArgs) {
   const { env } = context.get(cloudflareContext);
   const auth = createAuth(env.DB_APP, env.BETTER_AUTH_SECRET, env.BETTER_AUTH_URL);
   const session = await auth.api.getSession({ headers: request.headers });
+  // 已登录直接在服务端跳走，避免在渲染期调用 navigate()（React 会警告，
+  // 且会先闪一下登录表单）
+  if (session?.user) {
+    const url = new URL(request.url);
+    return redirect(safeRedirectTarget(url.searchParams.get("redirect")));
+  }
   const db = createDb(env.DB_APP);
   return {
-    loggedIn: Boolean(session),
     registrationEnabled: await getRegistrationEnabled(db),
-    turnstileSiteKey: env.TURNSTILE_SITE_KEY ?? null,
+    // 模板里留空时视为未配置，跳过人机验证
+    turnstileSiteKey: env.TURNSTILE_SITE_KEY || null,
   };
 }
 
@@ -37,11 +44,7 @@ export default function LoginPage({ loaderData }: Route.ComponentProps) {
   const [turnstileToken, setTurnstileToken] = useState("");
   const [params] = useSearchParams();
   const navigate = useNavigate();
-  const redirect = params.get("redirect") || "/";
-
-  if (loaderData.loggedIn) {
-    navigate(redirect, { replace: true });
-  }
+  const redirectTo = safeRedirectTarget(params.get("redirect"));
 
   async function onSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -87,7 +90,7 @@ export default function LoginPage({ loaderData }: Route.ComponentProps) {
         return;
       }
       clearLocalLoginFailures();
-      navigate(redirect, { replace: true });
+      navigate(redirectTo, { replace: true });
     } finally {
       setSubmitting(false);
     }
@@ -145,7 +148,7 @@ export default function LoginPage({ loaderData }: Route.ComponentProps) {
           还没有账号？{" "}
           {loaderData.registrationEnabled ? (
             <Link
-              to={`/register?redirect=${encodeURIComponent(redirect)}`}
+              to={`/register?redirect=${encodeURIComponent(redirectTo)}`}
               className="text-primary hover:underline"
             >
               注册

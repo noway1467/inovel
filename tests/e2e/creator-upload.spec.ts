@@ -33,6 +33,8 @@ test("creator upload page exposes the no-review switch", async ({ page }) => {
   test.setTimeout(90_000);
   await loginAuthor(page);
   await page.goto("/creator/upload");
+  // Radix Switch 在 hydration 完成前只是个无 handler 的 button，点了不会变状态
+  await page.waitForLoadState("networkidle");
   await expect(page.locator("#skip-review")).toBeVisible();
   await expect(page.locator("#skip-review")).not.toBeChecked();
   await page.locator("#skip-review").check();

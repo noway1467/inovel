@@ -8,6 +8,7 @@ import { createAuth } from "~/server/auth";
 import { createDb } from "~/server/db";
 import { getRegistrationEnabled } from "~/server/settings/registration";
 import { getUserRoleCodes } from "~/server/security/rbac";
+import { getVisiblePath, loginRedirectTo } from "~/server/http/request-path";
 import { notifications } from "drizzle/schema";
 import { and, eq, isNull } from "drizzle-orm";
 
@@ -16,9 +17,12 @@ export async function loader({ request, context }: Route.LoaderArgs) {
   const auth = createAuth(env.DB_APP, env.BETTER_AUTH_SECRET, env.BETTER_AUTH_URL);
   const session = await auth.api.getSession({ headers: request.headers });
   const url = new URL(request.url);
-  const isPublicPage = url.pathname === "/login" || url.pathname === "/register";
+  // 必须用还原后的路径：客户端导航请求的是 /register.data，直接比对会把公开页
+  // 误判成需要登录，导致 ?redirect= 无限套娃
+  const { pathname } = getVisiblePath(url);
+  const isPublicPage = pathname === "/login" || pathname === "/register";
   if (!session?.user && !isPublicPage) {
-    return redirect(`/login?redirect=${encodeURIComponent(url.pathname + url.search)}`);
+    return redirect(loginRedirectTo(url));
   }
   const db = createDb(env.DB_APP);
   const registrationEnabled = await getRegistrationEnabled(db);

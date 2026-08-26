@@ -18,6 +18,8 @@ import {
   defaultReaderSettings,
   loadLocalProgress,
   loadReaderSettings,
+  normalizePaginationMode,
+  normalizeReaderTheme,
   resolveReaderTheme,
   systemDarkQuery,
   saveLocalProgress,
@@ -34,6 +36,7 @@ import { isBookInShelf } from "~/server/repositories/shelf";
 import { getPreferences, getProgress } from "~/server/services/reader";
 import { getChapterContent } from "~/server/storage/chapter-content";
 import { chapterVersionKey } from "~/server/storage/keys";
+import { loginRedirectTo } from "~/server/http/request-path";
 
 // 分页模式每屏即一整页，正文宽度按目标行长自适应；滚动模式单独用安全边距。
 // 行长上限放宽（窄 96rem / 标准 80rem / 宽 66rem），减少两侧留白提高单页容量
@@ -57,7 +60,7 @@ export async function loader({ params, request, context }: Route.LoaderArgs) {
   const session = await auth.api.getSession({ headers: request.headers });
   const url = new URL(request.url);
   if (!session?.user) {
-    return redirect(`/login?redirect=${encodeURIComponent(url.pathname + url.search)}`);
+    return redirect(loginRedirectTo(url));
   }
   const userId = session.user.id;
   const db = createDb(env.DB_APP);
@@ -153,11 +156,12 @@ export default function ReaderPage({ loaderData }: Route.ComponentProps) {
       setSettings({
         ...defaultReaderSettings,
         ...stored,
-        theme: (preferences.theme as ReaderSettings["theme"]) ?? stored.theme,
+        // 服务端存的是自由文本，老库里有 "sepia" 这类早期值；硬转会让
+        // data-reader-theme 落到 CSS 匹配不到的值上，阅读器直接没配色
+        theme: normalizeReaderTheme(preferences.theme, stored.theme),
         fontSize: preferences.fontSize ?? stored.fontSize,
         lineHeight: preferences.lineHeight ?? stored.lineHeight,
-        paginationMode:
-          (preferences.paginationMode as ReaderSettings["paginationMode"]) ?? stored.paginationMode,
+        paginationMode: normalizePaginationMode(preferences.paginationMode, stored.paginationMode),
       });
     } else {
       setSettings(stored);

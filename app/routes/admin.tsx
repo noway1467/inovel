@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link } from "react-router";
+import { Link, useRevalidator } from "react-router";
 import type { Route } from "./+types/admin";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
@@ -34,6 +34,7 @@ export async function loader({ request, context }: Route.LoaderArgs) {
 }
 
 export default function AdminPage({ loaderData }: Route.ComponentProps) {
+  const revalidator = useRevalidator();
   const [registrationEnabled, setRegistrationEnabledState] = useState(loaderData.registrationEnabled);
   const [maxUploadMb, setMaxUploadMbState] = useState(loaderData.maxUploadMb);
   const [uploadMbInput, setUploadMbInput] = useState(String(loaderData.maxUploadMb));
@@ -74,6 +75,8 @@ export default function AdminPage({ loaderData }: Route.ComponentProps) {
         return;
       }
       setRegistrationEnabledState(Boolean(data.registrationEnabled));
+      // 顶栏注册入口来自 app-layout 的 loader，不重新校验的话开关要刷新页面才生效
+      void revalidator.revalidate();
       setMessage("已保存，前端入口即时生效");
     } finally {
       setSaving(false);

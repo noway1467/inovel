@@ -92,7 +92,14 @@ export function loadReaderSettings(): ReaderSettings {
     // 首次进入直接跟随系统：原来是按当前 dark class 定死 ink/paper，
     // 效果一样但之后系统切换深浅色就跟不上了
     if (!raw) return { ...defaultReaderSettings, theme: "system" };
-    return { ...defaultReaderSettings, ...(JSON.parse(raw) as Partial<ReaderSettings>) };
+    const parsed = JSON.parse(raw) as Partial<ReaderSettings>;
+    // localStorage 里可能残留旧版本写入的陌生值，必须过一遍校验再用
+    return {
+      ...defaultReaderSettings,
+      ...parsed,
+      theme: normalizeReaderTheme(parsed.theme),
+      paginationMode: normalizePaginationMode(parsed.paginationMode),
+    };
   } catch {
     return defaultReaderSettings;
   }

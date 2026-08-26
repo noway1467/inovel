@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link, useNavigate, useSearchParams } from "react-router";
+import { Link, redirect, useNavigate, useSearchParams } from "react-router";
 import type { Route } from "./+types/register";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
@@ -9,13 +9,19 @@ import { createAuth } from "~/server/auth";
 import { createDb } from "~/server/db";
 import { getRegistrationEnabled } from "~/server/settings/registration";
 import { translateAuthError } from "~/lib/auth-errors";
+import { safeRedirectTarget } from "~/lib/redirect";
 
 export async function loader({ request, context }: Route.LoaderArgs) {
   const { env } = context.get(cloudflareContext);
   const auth = createAuth(env.DB_APP, env.BETTER_AUTH_SECRET, env.BETTER_AUTH_URL);
   const session = await auth.api.getSession({ headers: request.headers });
+  // 已登录直接在服务端跳走，避免渲染期 navigate()
+  if (session?.user) {
+    const url = new URL(request.url);
+    return redirect(safeRedirectTarget(url.searchParams.get("redirect")));
+  }
   const db = createDb(env.DB_APP);
-  return { loggedIn: Boolean(session), registrationEnabled: await getRegistrationEnabled(db) };
+  return { registrationEnabled: await getRegistrationEnabled(db) };
 }
 
 export default function RegisterPage({ loaderData }: Route.ComponentProps) {
@@ -23,11 +29,7 @@ export default function RegisterPage({ loaderData }: Route.ComponentProps) {
   const [submitting, setSubmitting] = useState(false);
   const [params] = useSearchParams();
   const navigate = useNavigate();
-  const redirect = params.get("redirect") || "/";
-
-  if (loaderData.loggedIn) {
-    navigate(redirect, { replace: true });
-  }
+  const redirectTo = safeRedirectTarget(params.get("redirect"));
 
   if (!loaderData.registrationEnabled) {
     return (
@@ -65,7 +67,7 @@ export default function RegisterPage({ loaderData }: Route.ComponentProps) {
         setError(translateAuthError(data?.message, "注册失败，请稍后重试。"));
         return;
       }
-      navigate(redirect, { replace: true });
+      navigate(redirectTo, { replace: true });
     } finally {
       setSubmitting(false);
     }
@@ -96,7 +98,7 @@ export default function RegisterPage({ loaderData }: Route.ComponentProps) {
         </form>
         <p className="mt-4 text-center text-sm text-muted-foreground">
           已有账号？{" "}
-          <Link to={`/login?redirect=${encodeURIComponent(redirect)}`} className="text-primary hover:underline">
+          <Link to={`/login?redirect=${encodeURIComponent(redirectTo)}`} className="text-primary hover:underline">
             登录
           </Link>
         </p>
