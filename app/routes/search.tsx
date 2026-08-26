@@ -259,10 +259,14 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
                     variant="secondary"
                     asChild
                   >
+                    {/* 新标签页打开：搜索结果通常要挨个试几个源，
+                        原地跳转会丢掉这一页的搜索结果 */}
                     <a
                       href={`/source/${option.sourceId}/book?url=${encodeURIComponent(
                         option.externalId
                       )}&title=${encodeURIComponent(book.title)}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
                     >
                       {option.sourceName}
                     </a>

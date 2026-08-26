@@ -17,7 +17,7 @@ import {
   type SourceChapter,
 } from "~/server/sources/types";
 import { blockTextOf } from "~/server/sources/xml";
-import { detectChapterList } from "~/server/sources/toc-detect";
+import { detectChapterList, detectNextPageUrl } from "~/server/sources/toc-detect";
 
 /**
  * 通用 CSS 规则引擎适配器，消费 legado.ts 转换出的 RulesConfig。
@@ -219,7 +219,18 @@ export const rulesAdapter: SourceAdapter = {
         chapters.push({ externalKey, title });
       }
 
-      pageUrl = config.nextTocUrl ? nextPageUrl(doc, config.nextTocUrl, pageUrl, visited) : null;
+      /**
+       * 与正文分页同样处理：规则优先，缺失时用通用探测兜底。
+       * 目录分多页而书源没写 nextTocUrl 的源不少，不兜底就只能看到第一页章节。
+       */
+      const tocPageUrl: string = pageUrl;
+      const tocByRule: string | null = config.nextTocUrl
+        ? nextPageUrl(doc, config.nextTocUrl, tocPageUrl, visited)
+        : null;
+      const tocDetected: string | null =
+        !tocByRule && doc.kind === "html" ? detectNextPageUrl(doc.node, tocPageUrl) : null;
+      const tocCandidate = tocByRule ?? tocDetected;
+      pageUrl = tocCandidate && !visited.has(tocCandidate) ? tocCandidate : null;
       if (pageUrl) await delay(politeDelayMs);
     }
 
@@ -268,9 +279,20 @@ export const rulesAdapter: SourceAdapter = {
         paragraphs.push(...toParagraphs(text));
       }
 
-      pageUrl = config.nextContentUrl
-        ? nextPageUrl(doc, config.nextContentUrl, pageUrl, visited)
+      /**
+       * 先按书源规则找下一页；规则缺失或不可译时用通用探测兜底。
+       *
+       * 不少源没写 nextContentUrl，或那条规则要 JS 求值 —— 没有兜底
+       * 就只能拿到每章的第一页，正文被截断。
+       */
+      const currentUrl: string = pageUrl;
+      const byRule: string | null = config.nextContentUrl
+        ? nextPageUrl(doc, config.nextContentUrl, currentUrl, visited)
         : null;
+      const detected: string | null =
+        !byRule && doc.kind === "html" ? detectNextPageUrl(doc.node, currentUrl) : null;
+      const candidate = byRule ?? detected;
+      pageUrl = candidate && !visited.has(candidate) ? candidate : null;
       if (pageUrl) await delay(politeDelayMs);
     }
 

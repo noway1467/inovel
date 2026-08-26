@@ -85,16 +85,48 @@ describe("目录分页", () => {
     expect(chapters.map((c) => c.title)).toEqual(["第1章", "第2章", "第3章"]);
   });
 
-  it("没有分页规则时只取首页", async () => {
+  /**
+   * 书源没写 nextTocUrl 时，靠页面上的「下一页」链接兜底 ——
+   * 否则目录分多页的源只能看到第一页的章节。
+   */
+  it("没有分页规则时，靠通用探测跟随「下一页」", async () => {
     responses.set(
       "https://novels.example.org/book/1",
       tocPage([{ title: "第1章", href: "/c/1" }], `<a href="/book/1_2">下一页</a>`)
+    );
+    responses.set(
+      "https://novels.example.org/book/1_2",
+      tocPage([{ title: "第2章", href: "/c/2" }])
+    );
+
+    const chapters = await rulesAdapter.listChapters(ctxWith(baseConfig), {
+      externalId: "https://novels.example.org/book/1",
+    });
+    expect(chapters.map((c) => c.title)).toEqual(["第1章", "第2章"]);
+  });
+
+  it("页面上没有下一页链接时只取一页", async () => {
+    responses.set(
+      "https://novels.example.org/book/1",
+      tocPage([{ title: "第1章", href: "/c/1" }])
     );
     const chapters = await rulesAdapter.listChapters(ctxWith(baseConfig), {
       externalId: "https://novels.example.org/book/1",
     });
     expect(chapters).toHaveLength(1);
     expect(requestLog).toHaveLength(1);
+  });
+
+  it("目录页只有「下一章」时不误跟随", async () => {
+    responses.set(
+      "https://novels.example.org/book/1",
+      tocPage([{ title: "第1章", href: "/c/1" }], `<a href="/c/2">下一章</a>`)
+    );
+    const chapters = await rulesAdapter.listChapters(ctxWith(baseConfig), {
+      externalId: "https://novels.example.org/book/1",
+    });
+    expect(requestLog).toHaveLength(1);
+    expect(chapters).toHaveLength(1);
   });
 
   it("option@value 形态的分页：取下拉里还没访问过的页", async () => {
@@ -171,15 +203,29 @@ describe("正文分页", () => {
     expect(result.paragraphs).toEqual(["第一页正文", "第二页正文", "第三页正文"]);
   });
 
-  it("没有分页规则时只取首页，正文不拼接", async () => {
+  /**
+   * 书源没写 nextContentUrl 时靠探测兜底 —— 否则每章只拿到第一页，
+   * 正文被截断（表现为"只能看一页"）。
+   */
+  it("没有分页规则时，靠通用探测把各页拼完整", async () => {
     responses.set(
       "https://novels.example.org/c/1",
-      content("只要这一页", `<a href="/c/1_2">下一页</a>`)
+      content("第一页", `<a href="/c/1_2">下一页</a>`)
     );
+    responses.set("https://novels.example.org/c/1_2", content("第二页"));
+
     const result = await rulesAdapter.fetchChapter(ctxWith(baseConfig), {
       externalKey: "https://novels.example.org/c/1",
     });
-    expect(result.paragraphs).toEqual(["只要这一页"]);
+    expect(result.paragraphs).toEqual(["第一页", "第二页"]);
+  });
+
+  it("页面上没有下一页链接时只取一页", async () => {
+    responses.set("https://novels.example.org/c/1", content("就这一页"));
+    const result = await rulesAdapter.fetchChapter(ctxWith(baseConfig), {
+      externalKey: "https://novels.example.org/c/1",
+    });
+    expect(result.paragraphs).toEqual(["就这一页"]);
   });
 
   it("中间页抓不到时保留已取到的部分，不整章失败", async () => {

@@ -18,6 +18,50 @@ export interface DetectedChapter {
   url: string;
 }
 
+/**
+ * 「下一页」链接的文字。
+ *
+ * 必须与「下一章」严格区分：下一页是同一章的续页，要拼进当前章正文；
+ * 下一章是章节边界，拼进去会把两章混成一章。
+ */
+const nextPageTexts = ["下一页", "下页", "下一頁", "next page", "next"];
+const nextChapterTexts = ["下一章", "下章", "下一節", "下一节", "next chapter"];
+
+/**
+ * 从页面里探测「下一页」地址。
+ *
+ * 用于书源没写 nextContentUrl、或那条规则需要 JS 求值的情况 ——
+ * 这类源占比不小，没有兜底就只能看到每章的第一页。
+ *
+ * @param currentUrl 当前页地址，用于补全相对链接并排除自指
+ */
+export function detectNextPageUrl(root: XmlNode, currentUrl: string): string | null {
+  const links: { text: string; href: string }[] = [];
+  const walk = (node: XmlNode) => {
+    for (const child of elementChildren(node)) {
+      if (child.name === "a") {
+        const href = child.attrs.href ?? "";
+        if (href && !href.startsWith("#") && !href.startsWith("javascript:")) {
+          links.push({ text: textOf(child).trim().toLowerCase(), href });
+        }
+      }
+      walk(child);
+    }
+  };
+  walk(root);
+
+  for (const link of links) {
+    // 先排除「下一章」：它和「下一页」文字相近，混淆会把两章拼在一起
+    if (nextChapterTexts.some((word) => link.text.includes(word))) continue;
+    if (!nextPageTexts.some((word) => link.text.includes(word))) continue;
+
+    const resolved = resolveUrl(currentUrl, link.href);
+    if (resolved === currentUrl) continue;
+    return resolved;
+  }
+  return null;
+}
+
 /** 链接文字像章节名的模式，命中越多越可能是目录 */
 const chapterTitlePatterns = [
   /第\s*[\d一二三四五六七八九十百千零〇]+\s*[章节回话卷篇]/,

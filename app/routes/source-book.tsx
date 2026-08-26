@@ -89,6 +89,11 @@ export default function SourceBookPage({ loaderData }: Route.ComponentProps) {
             </Button>
           )}
           <Button size="sm" variant="secondary" asChild>
+            <a href={bookUrl} target="_blank" rel="noopener noreferrer">
+              查看源站页面
+            </a>
+          </Button>
+          <Button size="sm" variant="secondary" asChild>
             {/* 目录有缓存，加 refresh 参数绕过 */}
             <a href={`?url=${encodeURIComponent(bookUrl)}&title=${encodeURIComponent(title)}`}>
               <RefreshCw className="size-4" />
