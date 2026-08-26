@@ -4,7 +4,7 @@ import { contentSources } from "drizzle/schema";
 import { createDb, type AppDb } from "~/server/db";
 import { createSqliteD1 } from "../helpers/sqlite-d1";
 import { createSourceFixtures } from "../helpers/sources-fixtures";
-import { aggregateSearch } from "~/server/sources/search";
+import { aggregateSearch, maxSourcesPerSearch } from "~/server/sources/search";
 import { batchImportSources } from "~/server/sources/batch-import";
 import { bulkUpdateSources, listSourcesFiltered } from "~/server/sources/service";
 
@@ -12,6 +12,8 @@ let db: AppDb;
 let raw: DatabaseSync;
 let responses: Map<string, string>;
 let hangUrls: Set<string>;
+/** 记录出站请求，用于断言"一次只查一批源" */
+let requestLog: string[];
 
 const userId = "user-1";
 
@@ -50,11 +52,13 @@ beforeEach(() => {
 
   responses = new Map();
   hangUrls = new Set();
+  requestLog = [];
 
   vi.stubGlobal(
     "fetch",
     vi.fn((input: string | URL, init?: { signal?: AbortSignal }) => {
       const url = typeof input === "string" ? input : input.toString();
+      requestLog.push(url);
       if (hangUrls.has(url)) {
         // 永不结束，用来测单源超时不拖垮整次搜索
         return new Promise((_resolve, reject) => {
@@ -218,6 +222,142 @@ describe("aggregateSearch", () => {
 
   it("空关键字报错", async () => {
     await expect(aggregateSearch(db, "   ")).rejects.toThrow(/不能为空/);
+  });
+
+  /**
+   * 回归：把全部启用源放在一个请求里查会触发 Workers 资源上限
+   * （线上实测 250 个源直接 Error 1102）。必须分批。
+   */
+  describe("分批（Error 1102 回归）", () => {
+    /** 造出远超单批上限的源数量 */
+    async function seedMany(count: number) {
+      const list = Array.from({ length: count }, (_, i) =>
+        bookSource(`源${i}`, `s${i}.example.org`)
+      );
+      await batchImportSources(db, { text: JSON.stringify(list), actorId: userId });
+    }
+
+    it("单次查询的源数不超过上限，无论启用了多少源", async () => {
+      await seedMany(30);
+      const result = await aggregateSearch(db, "剑");
+
+      expect(result.totals.sourcesAvailable).toBe(30);
+      expect(result.totals.sourcesQueried).toBeLessThanOrEqual(maxSourcesPerSearch);
+      // 出站请求数必须与"本批源数"一致，不能是全部源
+      expect(requestLog.length).toBeLessThanOrEqual(maxSourcesPerSearch);
+    });
+
+    it("nextOffset 能把所有源轮完，且不重复不遗漏", async () => {
+      await seedMany(20);
+      const seen: string[] = [];
+      let offset: number | null = 0;
+      let guard = 0;
+
+      while (offset !== null && guard < 20) {
+        guard += 1;
+        const batch = await aggregateSearch(db, "剑", { offset });
+        for (const outcome of batch.outcomes) seen.push(outcome.sourceId);
+        offset = batch.totals.nextOffset;
+      }
+
+      expect(offset).toBeNull();
+      expect(seen).toHaveLength(20);
+      // 每个源恰好被查一次
+      expect(new Set(seen).size).toBe(20);
+    });
+
+    it("客户端要求过大的批量时被封顶", async () => {
+      await seedMany(30);
+      const result = await aggregateSearch(db, "剑", { maxSources: 999 });
+      expect(result.totals.sourcesQueried).toBeLessThanOrEqual(maxSourcesPerSearch);
+    });
+
+    it("显式指定源时不受批量上限约束", async () => {
+      await seedMany(12);
+      const sources = await listSourcesFiltered(db);
+      const ids = sources.slice(0, 10).map((s) => s.id);
+      const result = await aggregateSearch(db, "剑", { sourceIds: ids });
+      expect(result.totals.sourcesQueried).toBe(10);
+    });
+
+    it("最后一批查完后 nextOffset 为 null", async () => {
+      await seedMany(3);
+      const result = await aggregateSearch(db, "剑");
+      expect(result.totals.sourcesQueried).toBe(3);
+      expect(result.totals.nextOffset).toBeNull();
+    });
+  });
+
+  describe("搜索健康度影响排序", () => {
+    it("失败的源累加失败计数，成功的源清零", async () => {
+      await batchImportSources(db, {
+        text: JSON.stringify([bookSource("能搜到", "ok.example.org")]),
+        actorId: userId,
+      });
+      const kw = encodeURIComponent("剑");
+
+      // 先失败一次（地址不在 responses 里 → 404）
+      await aggregateSearch(db, "剑");
+      let rows = await db.select().from(contentSources).all();
+      expect(rows[0]?.searchFailures).toBe(1);
+
+      // 再成功一次
+      responses.set(
+        `https://ok.example.org/search?q=${kw}`,
+        searchHtml([{ title: "剑来", author: "烽火", href: "/b/1" }])
+      );
+      await aggregateSearch(db, "剑");
+      rows = await db.select().from(contentSources).all();
+      expect(rows[0]?.searchFailures).toBe(0);
+      expect(rows[0]?.lastSearchAt).toBeTruthy();
+    });
+
+    it("权重高的源优先被查", async () => {
+      await batchImportSources(db, {
+        text: JSON.stringify([
+          { ...bookSource("低权重", "low.example.org"), weight: 0 },
+          { ...bookSource("高权重", "high.example.org"), weight: 900 },
+        ]),
+        actorId: userId,
+      });
+
+      const result = await aggregateSearch(db, "剑", { maxSources: 1 });
+      expect(result.outcomes[0]?.sourceName).toBe("高权重");
+    });
+
+    /**
+     * 回归：曾按 searchFailures 排序，而每批又会写回该计数，
+     * 导致翻页时顺序漂移 —— 20 个源轮完只覆盖 12 个。
+     * 排序键必须在整轮分批期间保持不变。
+     */
+    it("失败计数变化不影响翻页覆盖（排序键在分批期间不变）", async () => {
+      const list = Array.from({ length: 16 }, (_, i) =>
+        bookSource(`源${i}`, `p${i}.example.org`)
+      );
+      await batchImportSources(db, { text: JSON.stringify(list), actorId: userId });
+
+      const seen: string[] = [];
+      let offset: number | null = 0;
+      let guard = 0;
+      // 全部源都会失败（地址不在 responses 里），失败计数每批都在涨
+      while (offset !== null && guard < 16) {
+        guard += 1;
+        const batch = await aggregateSearch(db, "剑", { offset });
+        for (const outcome of batch.outcomes) seen.push(outcome.sourceId);
+        offset = batch.totals.nextOffset;
+      }
+
+      expect(new Set(seen).size).toBe(16);
+    });
+
+    it("导入时把书源 weight 写入 searchWeight", async () => {
+      await batchImportSources(db, {
+        text: JSON.stringify([{ ...bookSource("高权重", "hi.example.org"), weight: 500 }]),
+        actorId: userId,
+      });
+      const rows = await db.select().from(contentSources).all();
+      expect(rows[0]?.searchWeight).toBe(500);
+    });
   });
 
   it("没有启用的源时返回空结果而不报错", async () => {

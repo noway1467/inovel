@@ -43,6 +43,8 @@ interface PendingSource {
   endpoint: string;
   kind: "feed" | "rules";
   config: Record<string, unknown> | null;
+  /** 书源自带 weight，作为搜索排序的初始优先级 */
+  weight: number;
   warnings: string[];
 }
 
@@ -59,6 +61,7 @@ function convertByFormat(
         endpoint: item.endpoint,
         kind: "rules" as const,
         config: item.config as unknown as Record<string, unknown>,
+        weight: item.weight,
         warnings: item.warnings,
       })),
       rejected: failed,
@@ -72,6 +75,8 @@ function convertByFormat(
         endpoint: item.endpoint,
         kind: item.kind,
         config: item.config as unknown as Record<string, unknown> | null,
+        // 订阅源格式没有 weight 字段
+        weight: 0,
         warnings: item.warnings,
       })),
       rejected: failed,
@@ -134,6 +139,7 @@ export async function batchImportSources(
         config: item.config,
         attribution: `来源：${item.name}`,
         syncIntervalMinutes: input.syncIntervalMinutes ?? 360,
+        searchWeight: item.weight,
         actorId: input.actorId,
       });
       created.push({

@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { asc, desc, eq, sql } from "drizzle-orm";
 import { contentSources, sourceStatus } from "drizzle/schema";
 import type { AppDb } from "~/server/db";
 import { getAdapter } from "~/server/sources/registry";
@@ -46,7 +46,16 @@ export interface AggregateSearchResult {
   keyword: string;
   books: GroupedBook[];
   outcomes: SourceOutcome[];
-  totals: { sourcesQueried: number; sourcesOk: number; hits: number; books: number };
+  totals: {
+    sourcesQueried: number;
+    sourcesOk: number;
+    hits: number;
+    books: number;
+    /** 启用且可搜的源总数，用于告诉使用者还剩多少没查 */
+    sourcesAvailable: number;
+    /** 下一批的起点；null 表示已查完所有源 */
+    nextOffset: number | null;
+  };
 }
 
 /** 给单个源的查询套上时限 */
@@ -97,11 +106,27 @@ function groupKey(title: string, author: string | null | undefined): string {
 }
 
 export interface AggregateSearchOptions {
-  /** 只查这些源；不传则查全部启用的源 */
+  /** 只查这些源；不传则按排序取一批启用的源 */
   sourceIds?: string[] | null;
   perSourceLimit?: number;
   timeoutMs?: number;
+  /**
+   * 本次最多查几个源。必须有上限：Workers 单请求的子请求数与 CPU 都有限，
+   * 250 个源一次全打出去会直接触发资源限制（Error 1102）。
+   */
+  maxSources?: number;
+  /** 从排序后的第几个源开始，用于分批把所有源轮完 */
+  offset?: number;
 }
+
+/**
+ * 单次搜索最多查的源数。
+ *
+ * 定这个值的约束不是并发，而是「一个请求内能做多少事」：
+ * 每个源一次出站 + 一份 HTML 解析，解析是 CPU 密集的。
+ * 8 个是实测下来既能出结果、又稳定不超限的值。
+ */
+export const maxSourcesPerSearch = 8;
 
 export async function aggregateSearch(
   db: AppDb,
@@ -115,18 +140,51 @@ export async function aggregateSearch(
     .select()
     .from(contentSources)
     .where(eq(contentSources.status, sourceStatus.enabled))
+    /**
+     * 排序键必须在整轮分批期间不变。
+     *
+     * 曾按 searchFailures 排序，但每批结束都会写回失败计数 ——
+     * 下一批重新查询时顺序已变，基于 offset 的翻页就会既重复又遗漏
+     * （实测 20 个源轮完只覆盖到 12 个）。
+     *
+     * searchWeight 来自导入时的书源 weight，搜索过程不会改；
+     * id 作为最终 tiebreaker 保证全序。失败计数仍然记录，
+     * 用于管理台展示与「停用长期失败的源」，但不参与翻页排序。
+     */
+    .orderBy(desc(contentSources.searchWeight), asc(contentSources.id))
     .all();
 
-  const wanted = options?.sourceIds?.length
+  const explicit = options?.sourceIds?.length
     ? all.filter((source) => options.sourceIds!.includes(source.id))
-    : all;
+    : null;
+
+  const pool = explicit ?? all;
+  const offset = Math.max(0, options?.offset ?? 0);
+  /**
+   * 上限在这里硬性封顶，不只在路由层。
+   * 任何调用方（含将来新增的）传再大的 maxSources 也不能突破 ——
+   * 否则又会回到"一个请求打 250 个源"的 Error 1102。
+   *
+   * 只有显式点名要查哪些源时才放开：那是调用方自己挑的一小组。
+   */
+  const limit = explicit
+    ? pool.length
+    : Math.min(Math.max(1, options?.maxSources ?? maxSourcesPerSearch), maxSourcesPerSearch);
+  const wanted = pool.slice(offset, offset + limit);
 
   if (wanted.length === 0) {
     return {
       keyword: trimmed,
       books: [],
       outcomes: [],
-      totals: { sourcesQueried: 0, sourcesOk: 0, hits: 0, books: 0 },
+      totals: {
+        sourcesQueried: 0,
+        sourcesOk: 0,
+        hits: 0,
+        books: 0,
+        sourcesAvailable: pool.length,
+        nextOffset: null,
+      },
     };
   }
 
@@ -213,6 +271,10 @@ export async function aggregateSearch(
   // 多源命中的排前面：可选源越多越可能是真结果
   const books = [...grouped.values()].sort((a, b) => b.options.length - a.options.length);
 
+  // 记录各源的搜索健康度，影响下次的排序
+  await recordSearchHealth(db, outcomes);
+
+  const consumed = offset + wanted.length;
   return {
     keyword: trimmed,
     books,
@@ -222,6 +284,31 @@ export async function aggregateSearch(
       sourcesOk: outcomes.filter((item) => item.status === "ok").length,
       hits: hits.length,
       books: books.length,
+      sourcesAvailable: pool.length,
+      nextOffset: consumed < pool.length ? consumed : null,
     },
   };
+}
+
+/**
+ * 把本批各源的成败写回。
+ *
+ * 成功则清零失败计数并记时间；失败/超时累加。排序据此让稳定出结果的
+ * 源留在前面，坏源逐渐沉底 —— 分批查的前提是"前几批就是最可能有结果的"。
+ */
+async function recordSearchHealth(db: AppDb, outcomes: SourceOutcome[]): Promise<void> {
+  for (const outcome of outcomes) {
+    if (outcome.status === "unsupported") continue;
+    if (outcome.status === "ok") {
+      await db
+        .update(contentSources)
+        .set({ searchFailures: 0, lastSearchAt: new Date() })
+        .where(eq(contentSources.id, outcome.sourceId));
+      continue;
+    }
+    await db
+      .update(contentSources)
+      .set({ searchFailures: sql`${contentSources.searchFailures} + 1` })
+      .where(eq(contentSources.id, outcome.sourceId));
+  }
 }

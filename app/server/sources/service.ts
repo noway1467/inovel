@@ -206,6 +206,8 @@ export interface CreateSourceInput {
   config?: Record<string, unknown> | null;
   attribution?: string | null;
   syncIntervalMinutes?: number;
+  /** 搜索排序的初始优先级，来自书源自带的 weight */
+  searchWeight?: number;
   actorId: string;
 }
 
@@ -254,6 +256,7 @@ export async function createSource(db: AppDb, input: CreateSourceInput) {
     config: input.config ?? null,
     attribution: input.attribution?.slice(0, 200) ?? null,
     syncIntervalMinutes: interval,
+    searchWeight: Number.isFinite(input.searchWeight ?? 0) ? (input.searchWeight ?? 0) : 0,
     createdBy: input.actorId,
   });
 

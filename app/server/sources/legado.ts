@@ -62,6 +62,8 @@ interface LegadoContentRule {
 export interface LegadoBookSource {
   bookSourceName?: string;
   bookSourceUrl?: string;
+  /** 书源自带权重，用作搜索排序的初始优先级 */
+  weight?: number;
   bookSourceComment?: string;
   searchUrl?: string;
   ruleSearch?: LegadoSearchRule;
@@ -74,6 +76,11 @@ export interface ConversionResult {
   name: string;
   endpoint: string;
   config: RulesConfig;
+  /**
+   * 书源自带的 weight，作为搜索排序的初始优先级。
+   * 站内搜索每次只查一小批源，得有个"先查谁"的依据。
+   */
+  weight: number;
   /** 无法翻译但不致命的规则，提示运营方手工调整 */
   warnings: string[];
 }
@@ -195,7 +202,10 @@ export function convertLegadoSource(raw: unknown): ConversionResult {
     baseUrl: endpoint,
   };
 
-  return { name, endpoint, config, warnings };
+  const weight = typeof source.weight === "number" && Number.isFinite(source.weight)
+    ? source.weight
+    : 0;
+  return { name, endpoint, config, weight, warnings };
 }
 
 export interface BatchConversionResult {

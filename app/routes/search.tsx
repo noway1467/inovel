@@ -1,5 +1,6 @@
+import { useCallback, useEffect, useState } from "react";
 import { Form, useSearchParams } from "react-router";
-import { Search } from "lucide-react";
+import { Loader2, Search } from "lucide-react";
 import type { Route } from "./+types/search";
 import { BookListItem } from "~/components/book/book-list-item";
 import type { BookSummary } from "~/components/book/book-card";
@@ -7,43 +8,39 @@ import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import { EmptyState } from "~/components/state/empty-state";
+import { eq, sql } from "drizzle-orm";
+import { contentSources } from "drizzle/schema";
 import { cloudflareContext } from "~/server/context";
 import { createDb } from "~/server/db";
 import { searchBooks } from "~/server/repositories/books";
-import { aggregateSearch } from "~/server/sources/search";
 
 const hotWords = ["星海拾荒者", "盛唐小吏", "剑出昆仑", "系统", "重生", "都市"];
 
 export async function loader({ request, context }: Route.LoaderArgs) {
   const url = new URL(request.url);
   const q = url.searchParams.get("q")?.trim() ?? "";
-  if (!q) return { query: "", results: [], sourceBooks: [], sourceStats: null };
+  if (!q) return { query: "", results: [], sourceCount: 0 };
   const { env } = context.get(cloudflareContext);
   const db = createDb(env.DB_APP);
 
   /**
-   * 本站书库与在线源并行查。
+   * loader 只查本站书库。
    *
-   * 在线源要出站抓取，慢且可能失败，所以单独 catch —— 源全挂也不能
-   * 影响本站结果。整体再套一层时限，避免搜索页被慢源拖住。
+   * 在线源搜索一律交给客户端分批调 /api/sources/search：
+   * 每个源一次出站 + 一份 HTML 解析，250 个源放在一个请求里必然触发
+   * Workers 资源上限（Error 1102）。分批后每批 8 个源，页面先出本站结果，
+   * 源结果陆续补上。
    */
-  const [results, aggregate] = await Promise.all([
+  const [results, enabled] = await Promise.all([
     searchBooks(db, q, 30),
-    aggregateSearch(db, q, { perSourceLimit: 5, timeoutMs: 8_000 }).catch(() => null),
+    db
+      .select({ count: sql<number>`count(*)` })
+      .from(contentSources)
+      .where(eq(contentSources.status, "enabled"))
+      .get(),
   ]);
 
-  return {
-    query: q,
-    results,
-    sourceBooks: aggregate?.books.slice(0, 40) ?? [],
-    sourceStats: aggregate
-      ? {
-          queried: aggregate.totals.sourcesQueried,
-          ok: aggregate.totals.sourcesOk,
-          books: aggregate.totals.books,
-        }
-      : null,
-  };
+  return { query: q, results, sourceCount: Number(enabled?.count ?? 0) };
 }
 
 function toSummary(book: Awaited<ReturnType<typeof searchBooks>>[number]): BookSummary {
@@ -59,6 +56,193 @@ function toSummary(book: Awaited<ReturnType<typeof searchBooks>>[number]): BookS
     updatedAt: book.updatedAt?.toISOString() ?? null,
     coverKey: book.coverKey,
   };
+}
+
+interface SourceOption {
+  sourceId: string;
+  sourceName: string;
+  externalId: string;
+}
+
+interface SourceBook {
+  title: string;
+  author: string | null;
+  description: string | null;
+  options: SourceOption[];
+}
+
+interface BatchResponse {
+  books: SourceBook[];
+  totals: {
+    sourcesQueried: number;
+    sourcesOk: number;
+    sourcesAvailable: number;
+    nextOffset: number | null;
+  };
+  error?: string;
+}
+
+/**
+ * 在线源结果，分批加载。
+ *
+ * 每批只查 8 个源，边查边把结果并进列表。这样单个请求的出站数与
+ * CPU 都有界，不会像原先那样一次打 250 个源直接触发 Error 1102。
+ */
+function SourceResults({ query, sourceCount }: { query: string; sourceCount: number }) {
+  const [books, setBooks] = useState<SourceBook[]>([]);
+  const [queried, setQueried] = useState(0);
+  const [okCount, setOkCount] = useState(0);
+  const [nextOffset, setNextOffset] = useState<number | null>(0);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  // 换关键词时重置，避免上一次的结果串到下一次
+  useEffect(() => {
+    setBooks([]);
+    setQueried(0);
+    setOkCount(0);
+    setNextOffset(0);
+    setError("");
+  }, [query]);
+
+  const loadBatch = useCallback(
+    async (offset: number) => {
+      setLoading(true);
+      setError("");
+      try {
+        const response = await fetch(
+          `/api/sources/search?q=${encodeURIComponent(query)}&offset=${offset}`
+        );
+        const data = (await response.json()) as BatchResponse;
+        if (!response.ok) {
+          setError(data.error ?? "在线源搜索失败");
+          setNextOffset(null);
+          return;
+        }
+        // 同名同作者的书合并各源，不重复列
+        setBooks((prev) => {
+          const merged = new Map(prev.map((book) => [`${book.title}|${book.author ?? ""}`, book]));
+          for (const incoming of data.books) {
+            const key = `${incoming.title}|${incoming.author ?? ""}`;
+            const existing = merged.get(key);
+            if (!existing) {
+              merged.set(key, incoming);
+              continue;
+            }
+            const seen = new Set(
+              existing.options.map((option) => `${option.sourceId}|${option.externalId}`)
+            );
+            for (const option of incoming.options) {
+              const id = `${option.sourceId}|${option.externalId}`;
+              if (!seen.has(id)) existing.options.push(option);
+            }
+            if (!existing.description && incoming.description) {
+              existing.description = incoming.description;
+            }
+          }
+          return [...merged.values()].sort((a, b) => b.options.length - a.options.length);
+        });
+        setQueried((prev) => prev + data.totals.sourcesQueried);
+        setOkCount((prev) => prev + data.totals.sourcesOk);
+        setNextOffset(data.totals.nextOffset);
+      } catch {
+        setError("网络异常，稍后重试");
+        setNextOffset(null);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [query]
+  );
+
+  // 首批自动查，后续由用户点「继续搜索」推进
+  useEffect(() => {
+    if (!query || sourceCount === 0) return;
+    void loadBatch(0);
+  }, [query, sourceCount, loadBatch]);
+
+  if (sourceCount === 0) {
+    return (
+      <section>
+        <h2 className="mb-3 text-sm font-semibold">在线源</h2>
+        <p className="rounded-lg border border-border bg-surface px-3 py-2.5 text-sm text-muted-foreground">
+          还没有启用在线源。管理员可在「在线源」里批量导入。
+        </p>
+      </section>
+    );
+  }
+
+  return (
+    <section>
+      <div className="mb-3 flex flex-wrap items-baseline gap-2">
+        <h2 className="text-sm font-semibold">在线源</h2>
+        <span className="text-xs text-muted-foreground">
+          已查 {queried}/{sourceCount} 个源，{okCount} 个有结果
+        </span>
+        {loading && <Loader2 className="size-3.5 animate-spin text-muted-foreground" />}
+      </div>
+
+      {error && <p className="mb-2 text-sm text-danger">{error}</p>}
+
+      {books.length === 0 && !loading && queried > 0 && (
+        <p className="rounded-lg border border-border bg-surface px-3 py-2.5 text-sm text-muted-foreground">
+          已查的源里没有匹配结果{nextOffset !== null && "，可以继续搜索剩下的源"}。
+        </p>
+      )}
+
+      {books.length > 0 && (
+        <ul className="space-y-2">
+          {books.map((book, i) => (
+            <li key={`${book.title}-${i}`} className="rounded-lg border border-border bg-surface p-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-medium">{book.title}</span>
+                {book.author && (
+                  <span className="text-xs text-muted-foreground">{book.author}</span>
+                )}
+                <Badge variant="secondary">{book.options.length} 个源</Badge>
+              </div>
+              {book.description && (
+                <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
+                  {book.description}
+                </p>
+              )}
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {book.options.map((option) => (
+                  <Button
+                    key={`${option.sourceId}-${option.externalId}`}
+                    size="sm"
+                    variant="secondary"
+                    asChild
+                  >
+                    <a
+                      href={`/source/${option.sourceId}/book?url=${encodeURIComponent(
+                        option.externalId
+                      )}&title=${encodeURIComponent(book.title)}`}
+                    >
+                      {option.sourceName}
+                    </a>
+                  </Button>
+                ))}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {nextOffset !== null && (
+        <Button
+          className="mt-3"
+          variant="secondary"
+          size="sm"
+          disabled={loading}
+          onClick={() => void loadBatch(nextOffset)}
+        >
+          {loading ? <Loader2 className="size-4 animate-spin" /> : null}
+          继续搜索剩下的 {sourceCount - queried} 个源
+        </Button>
+      )}
+    </section>
+  );
 }
 
 export default function SearchPage({ loaderData }: Route.ComponentProps) {
@@ -139,68 +323,9 @@ export default function SearchPage({ loaderData }: Route.ComponentProps) {
             )}
           </section>
 
-          {/* 在线源结果：点开即读，不需要先订阅或发布 */}
-          <section>
-            <div className="mb-3 flex flex-wrap items-baseline gap-2">
-              <h2 className="text-sm font-semibold">在线源</h2>
-              {loaderData.sourceStats && (
-                <span className="text-xs text-muted-foreground">
-                  查询 {loaderData.sourceStats.queried} 个源，{loaderData.sourceStats.ok} 个有响应，
-                  合并 {loaderData.sourceStats.books} 本
-                </span>
-              )}
-            </div>
+          <SourceResults query={loaderData.query} sourceCount={loaderData.sourceCount} />
 
-            {loaderData.sourceBooks.length === 0 ? (
-              <p className="rounded-lg border border-border bg-surface px-3 py-2.5 text-sm text-muted-foreground">
-                {loaderData.sourceStats && loaderData.sourceStats.queried > 0
-                  ? "在线源没有匹配结果。"
-                  : "还没有启用支持搜索的在线源。"}
-              </p>
-            ) : (
-              <ul className="space-y-2">
-                {loaderData.sourceBooks.map((book, i) => (
-                  <li
-                    key={`${book.title}-${i}`}
-                    className="rounded-lg border border-border bg-surface p-3"
-                  >
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-medium">{book.title}</span>
-                      {book.author && (
-                        <span className="text-xs text-muted-foreground">{book.author}</span>
-                      )}
-                      <Badge variant="secondary">{book.options.length} 个源</Badge>
-                    </div>
-                    {book.description && (
-                      <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
-                        {book.description}
-                      </p>
-                    )}
-                    <div className="mt-2 flex flex-wrap gap-1.5">
-                      {book.options.map((option) => (
-                        <Button
-                          key={`${option.sourceId}-${option.externalId}`}
-                          size="sm"
-                          variant="secondary"
-                          asChild
-                        >
-                          <a
-                            href={`/source/${option.sourceId}/book?url=${encodeURIComponent(
-                              option.externalId
-                            )}&title=${encodeURIComponent(book.title)}`}
-                          >
-                            {option.sourceName}
-                          </a>
-                        </Button>
-                      ))}
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
-
-          {loaderData.results.length === 0 && loaderData.sourceBooks.length === 0 && (
+          {loaderData.results.length === 0 && loaderData.sourceCount === 0 && (
             <EmptyState
               title="没有找到相关作品"
               description="换个关键词试试，或浏览热门标签。"

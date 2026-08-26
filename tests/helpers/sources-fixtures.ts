@@ -77,7 +77,11 @@ export function createSourceFixtures(raw: DatabaseSync) {
       config TEXT, attribution TEXT,
       sync_interval_minutes INTEGER NOT NULL DEFAULT 360,
       last_sync_at INTEGER, last_sync_status TEXT, last_sync_message TEXT,
-      consecutive_failures INTEGER NOT NULL DEFAULT 0, created_by TEXT,
+      consecutive_failures INTEGER NOT NULL DEFAULT 0,
+      search_weight INTEGER NOT NULL DEFAULT 0,
+      search_failures INTEGER NOT NULL DEFAULT 0,
+      last_search_at INTEGER,
+      created_by TEXT,
       created_at INTEGER NOT NULL DEFAULT ${now},
       updated_at INTEGER NOT NULL DEFAULT ${now}
     );

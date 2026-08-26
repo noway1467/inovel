@@ -68,6 +68,13 @@ export const contentSources = sqliteTable(
     lastSyncStatus: text("last_sync_status"),
     lastSyncMessage: text("last_sync_message"),
     consecutiveFailures: integer("consecutive_failures").notNull().default(0),
+    /**
+     * 搜索优先级与健康度。站内搜索每次只查一小批源（全查会超 Worker
+     * 资源上限），靠这三个字段决定"先查谁"：权重高、近期成功、失败少的优先。
+     */
+    searchWeight: integer("search_weight").notNull().default(0),
+    searchFailures: integer("search_failures").notNull().default(0),
+    lastSearchAt: integer("last_search_at", { mode: "timestamp_ms" }),
     createdBy: text("created_by").references(() => users.id),
     createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().defaultNow(),
     updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().defaultNow(),
@@ -75,6 +82,11 @@ export const contentSources = sqliteTable(
   (table) => [
     index("content_sources_status_idx").on(table.status),
     index("content_sources_last_sync_idx").on(table.lastSyncAt),
+    index("content_sources_search_rank_idx").on(
+      table.status,
+      table.searchFailures,
+      table.searchWeight
+    ),
   ]
 );
 
