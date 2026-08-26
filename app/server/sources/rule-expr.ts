@@ -99,8 +99,21 @@ function parseExclusions(raw: string): { body: string; excludes: number[] } {
 function segmentToCss(segment: string): string {
   const trimmed = segment.trim();
   if (!trimmed) return "";
+
+  /**
+   * `.name.2` / `#id.2` 形态：末段是纯数字时表示序号，不是第二个 class。
+   *
+   * 此前原样透传，CSS 会理解成「同时具有 name 和 2 两个 class」——
+   * 永远选不中，而且不报错。真实书源里 `.chapter.1@tag.li`
+   * `.section-list.1@a` 都是这种写法，是「目录规则未命中」的一类根因。
+   */
+  const indexedCss = /^([.#][\w-]+)\.(-?\d+)$/.exec(trimmed);
+  if (indexedCss) {
+    return `${indexedCss[1]}:eq(${Number.parseInt(indexedCss[2] ?? "0", 10)})`;
+  }
+
   // 已经是 CSS 形态（含 . # [ 前缀或组合子）时原样返回
-  if (/^[.#[]/.test(trimmed) || /[>\s,]/.test(trimmed)) return trimmed;
+  if (/^[.#[]/.test(trimmed) || /[>+\s,]/.test(trimmed)) return trimmed;
 
   const parts = trimmed.split(".");
   const head = parts[0]?.toLowerCase() ?? "";
@@ -119,8 +132,14 @@ function segmentToCss(segment: string): string {
     case "children":
       return `> *${suffix}`;
     case "text":
-      // text.关键字 是"包含该文本的节点"，CSS 无对应能力
-      throw new UnsupportedRuleError(`不支持按文本内容筛选：${trimmed}`);
+      /**
+       * text.关键字 = 「文本包含该串的节点」，jsoup 的 :containsOwn 方言。
+       *
+       * 这是分页规则里最常见的形态（`text.下一页@href` 在真实合集里
+       * 出现频率最高）。此前直接抛错，等于分页功能整体不可用。
+       * 译成 :contains，由 CSS 引擎做文本匹配。
+       */
+      return name ? `*:contains(${name})${suffix}` : "";
     default:
       // 裸标签名，可能带索引：div.2 / em.-1
       if (parts.length >= 2 && Number.isFinite(Number.parseInt(parts[1] ?? "", 10))) {

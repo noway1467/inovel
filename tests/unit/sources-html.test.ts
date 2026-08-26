@@ -111,6 +111,44 @@ describe("queryAll CSS 子集", () => {
   });
 });
 
+describe("分页与序号相关的选择器", () => {
+  const html = `<div class="page">
+    <a href="/p1">上一页</a><a href="/p2">下一页</a>
+    <select>
+      <option value="v0">第1页</option>
+      <option value="v1">第2页</option>
+      <option value="v2">第3页</option>
+    </select>
+    <ul id="cl"><p><a href="/x0">x0</a></p><p><a href="/x1">x1</a></p><p><a href="/x2">x2</a></p><p><a href="/x3">x3</a></p></ul>
+  </div>`;
+  const root = parseHtml(html);
+
+  it(":contains 按文本定位（分页链接最常见形态）", () => {
+    const next = queryFirst(root, "a:contains(下一页)");
+    expect(next?.attrs.href).toBe("/p2");
+    expect(queryFirst(root, "a:contains(上一页)")?.attrs.href).toBe("/p1");
+  });
+
+  it(":contains 选不中时返回空，不误命中", () => {
+    expect(queryAll(root, "a:contains(没有这个词)")).toEqual([]);
+  });
+
+  it(":gt / :lt 裁剪命中集", () => {
+    expect(queryAll(root, "#cl > p:gt(1)")).toHaveLength(2);
+    expect(queryAll(root, "#cl > p:lt(2)")).toHaveLength(2);
+  });
+
+  it("[from:to] 区间，负数从后计", () => {
+    const picked = queryAll(root, "#cl p[1:-2] a");
+    expect(picked.map((a) => a.attrs.href)).toEqual(["/x1", "/x2"]);
+  });
+
+  it("+ 紧邻兄弟", () => {
+    expect(queryFirst(root, "option[value=v0]+option")?.attrs.value).toBe("v1");
+    expect(queryFirst(root, "option[value=v2]+option")).toBeNull();
+  });
+});
+
 describe("innerHtml", () => {
   it("保留子元素结构与空元素形态", () => {
     const root = parseHtml(`<div><p>甲</p><br><span class="s">乙</span></div>`);

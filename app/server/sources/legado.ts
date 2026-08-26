@@ -28,8 +28,12 @@ export interface RulesConfig {
   tocList: string;
   tocName: string;
   tocUrl: string;
+  /** 目录下一页地址；目录分多页时靠它翻完 */
+  nextTocUrl?: string | null;
   /** 正文规则（必需） */
   contentRule: string;
+  /** 正文下一页地址；长章节分多页时靠它拼完整 */
+  nextContentUrl?: string | null;
   /** 源站基地址，用于相对链接补全 */
   baseUrl?: string | null;
 }
@@ -53,10 +57,12 @@ interface LegadoTocRule {
   chapterList?: string;
   chapterName?: string;
   chapterUrl?: string;
+  nextTocUrl?: string;
 }
 
 interface LegadoContentRule {
   content?: string;
+  nextContentUrl?: string;
 }
 
 export interface LegadoBookSource {
@@ -198,7 +204,10 @@ export function convertLegadoSource(raw: unknown): ConversionResult {
     tocList,
     tocName,
     tocUrl,
+    // 分页规则可缺、可不可译：缺了只是拿不到后续页，不影响首页可用
+    nextTocUrl: validate(clean(source.ruleToc?.nextTocUrl), "目录分页", warnings),
     contentRule,
+    nextContentUrl: validate(clean(source.ruleContent?.nextContentUrl), "正文分页", warnings),
     baseUrl: endpoint,
   };
 

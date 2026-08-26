@@ -90,10 +90,30 @@ describe("parseRule 方言翻译", () => {
   it("不支持的方言明确报错，不静默出错", () => {
     expect(() => parseRule("<js>result")).toThrow(UnsupportedRuleError);
     expect(() => parseRule("//div[@class]")).toThrow(UnsupportedRuleError);
-    expect(() => parseRule("text.简介@text")).toThrow(UnsupportedRuleError);
     expect(() => parseRule("")).toThrow(UnsupportedRuleError);
     // {{}} 模板需要 JS 求值
     expect(() => parseRule("{{url=source.getKey()}}?q={{key}}")).toThrow(UnsupportedRuleError);
+  });
+
+  it("text.关键字 译成 :contains（分页规则最常见形态）", () => {
+    expect(first("text.下一页@href").selector).toBe("*:contains(下一页)");
+    expect(first("text.下一章@href").target).toEqual({ kind: "attr", name: "href" });
+  });
+
+  /**
+   * 回归：`.chapter.1` 本意是「第 2 个 .chapter」，而非「同时有
+   * chapter 与 1 两个 class」。此前原样透传给 CSS，永远选不中且不报错，
+   * 是「目录规则未命中任何章节」的一类根因。
+   */
+  it(".class.N 译成序号，而不是两个 class", () => {
+    expect(first(".chapter.1@tag.li").selector).toBe(".chapter:eq(1) li");
+    expect(first(".section-list.1@a").selector).toBe(".section-list:eq(1) a");
+    expect(first("#list.2@a").selector).toBe("#list:eq(2) a");
+  });
+
+  it("真正的多 class 选择器不被误判", () => {
+    // 末段不是纯数字，应保持多 class 语义
+    expect(first(".item.hot@a").selector).toBe(".item.hot a");
   });
 
   it("canParseRule 不抛错，返回布尔", () => {

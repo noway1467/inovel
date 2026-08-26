@@ -1,4 +1,4 @@
-import { guardedFetch } from "~/server/sources/fetch-guard";
+import { delay, guardedFetch, politeDelayMs } from "~/server/sources/fetch-guard";
 import { parseHtml } from "~/server/sources/html";
 import { buildSearchUrl, type RulesConfig } from "~/server/sources/legado";
 import {
@@ -17,6 +17,7 @@ import {
   type SourceChapter,
 } from "~/server/sources/types";
 import { blockTextOf } from "~/server/sources/xml";
+import { fallbackChaptersFromText } from "~/server/sources/toc-fallback";
 
 /**
  * 通用 CSS 规则引擎适配器，消费 legado.ts 转换出的 RulesConfig。
@@ -24,6 +25,59 @@ import { blockTextOf } from "~/server/sources/xml";
  * 抓取一律经 guardedFetch，域名不在授权白名单内直接拒绝 —— 这是这个
  * 适配器唯一的放行开关，装了规则也不等于能抓。
  */
+
+/**
+ * 分页翻页上限。必须有界：分页规则常写成 `option@value`（下拉里所有页），
+ * 或指向自身，没有上限就会无限翻或打爆源站。
+ */
+const maxTocPages = 30;
+const maxContentPages = 20;
+
+/**
+ * 求下一页地址。
+ *
+ * 分页规则有两种常见形态：
+ *  - `text.下一页@href`：直接给出下一页链接
+ *  - `option@value` / `option!0@value`：下拉框里列出全部页，
+ *    此时规则会返回多个值，取第一个没访问过的才是"下一页"
+ */
+function nextPageUrl(
+  doc: RuleDoc,
+  rule: string,
+  currentUrl: string,
+  visited: Set<string>
+): string | null {
+  const candidates = evalRuleAll(doc, rule);
+  for (const raw of candidates) {
+    if (!raw) continue;
+    const resolved = resolveUrl(currentUrl, raw);
+    if (resolved === currentUrl || visited.has(resolved)) continue;
+    return resolved;
+  }
+  return null;
+}
+
+/**
+ * 目录规则失效时，从页面正文切出章节。
+ *
+ * 优先用正文规则取内容（它通常指向真正的文章容器）；正文规则也不中时，
+ * 退到整页块级文本 —— 那会带上导航等噪声，但比完全读不了好。
+ */
+async function fallbackFromPage(
+  ctx: Parameters<SourceAdapter["listChapters"]>[0],
+  config: RulesConfig,
+  pageUrl: string
+): Promise<SourceChapter[] | null> {
+  const doc = await loadDoc(ctx, pageUrl);
+
+  const viaContentRule = evalRuleOne(doc, config.contentRule);
+  const raw = viaContentRule || (doc.kind === "html" ? blockTextOf(doc.node) : "");
+  if (!raw) return null;
+
+  const text = raw.includes("<") ? blockTextOf(parseHtml(raw)) : raw;
+  const result = fallbackChaptersFromText(text);
+  return result ? result.chapters : null;
+}
 
 function readConfig(config: Record<string, unknown>): RulesConfig {
   const tocList = typeof config.tocList === "string" ? config.tocList : "";
@@ -135,39 +189,96 @@ export const rulesAdapter: SourceAdapter = {
     return [];
   },
 
+  /**
+   * 拉目录，跟随 nextTocUrl 翻完所有页。
+   *
+   * 真实合集里约三成的源目录分多页，只取首页会漏掉大部分章节
+   * （表现为"源站有 3 页，站内只看到 1 页"）。
+   */
   async listChapters(ctx, book): Promise<SourceChapter[]> {
     const config = readConfig(ctx.config);
-    const tocUrl = await resolveTocUrl(ctx, config, book.externalId);
-    const doc = await loadDoc(ctx, tocUrl);
-    const items = evalRuleNodes(doc, config.tocList);
+    const firstUrl = await resolveTocUrl(ctx, config, book.externalId);
+
     const chapters: SourceChapter[] = [];
     const seen = new Set<string>();
-    for (const item of items) {
-      const title = evalRuleOne(item, config.tocName);
-      const href = evalRuleOne(item, config.tocUrl);
-      if (!title || !href) continue;
-      const externalKey = resolveUrl(tocUrl, href);
-      // 目录页常有"最新章节"重复块，按地址去重
-      if (seen.has(externalKey)) continue;
-      seen.add(externalKey);
-      chapters.push({ externalKey, title });
+    // 访问过的页面地址，防止分页规则自指导致死循环
+    const visited = new Set<string>();
+    let pageUrl: string | null = firstUrl;
+    let pages = 0;
+
+    while (pageUrl && pages < maxTocPages) {
+      if (visited.has(pageUrl)) break;
+      visited.add(pageUrl);
+      pages += 1;
+
+      const doc = await loadDoc(ctx, pageUrl);
+      for (const item of evalRuleNodes(doc, config.tocList)) {
+        const title = evalRuleOne(item, config.tocName);
+        const href = evalRuleOne(item, config.tocUrl);
+        if (!title || !href) continue;
+        const externalKey = resolveUrl(pageUrl, href);
+        // 目录页常有"最新章节"重复块，按地址去重
+        if (seen.has(externalKey)) continue;
+        seen.add(externalKey);
+        chapters.push({ externalKey, title });
+      }
+
+      pageUrl = config.nextTocUrl ? nextPageUrl(doc, config.nextTocUrl, pageUrl, visited) : null;
+      if (pageUrl) await delay(politeDelayMs);
     }
-    if (chapters.length === 0) {
-      throw new Error("目录规则未命中任何章节，检查 tocList / tocName / tocUrl");
-    }
-    return chapters;
+
+    if (chapters.length > 0) return chapters;
+
+    /**
+     * 目录规则一无所获时兜底：把页面正文当长文本，用本地导入那套
+     * 章节识别引擎切章（认不出标题就按字数切）。
+     *
+     * 书源规则常年失修，站点一改版 tocList 就失效。与其把整本书判死，
+     * 不如退一步给出可读的章节。
+     */
+    const fallback = await fallbackFromPage(ctx, config, firstUrl);
+    if (fallback) return fallback;
+
+    throw new Error(
+      `目录规则未命中任何章节（已尝试 ${pages} 页），且页面正文不足以切分。` +
+        `检查 tocList / tocName / tocUrl 是否匹配该站结构。`
+    );
   },
 
+  /**
+   * 拉正文，跟随 nextContentUrl 把分页的长章节拼完整。
+   *
+   * 不少站把一章切成若干页，只取首页会导致每章正文都被截断。
+   */
   async fetchChapter(ctx, chapter) {
     const config = readConfig(ctx.config);
-    const doc = await loadDoc(ctx, chapter.externalKey);
-    const parsed = evalRuleOne(doc, config.contentRule);
-    if (!parsed) throw new Error("正文规则未命中内容");
-    // 正文规则多为 @html/@content，取出来的是 HTML 片段，需再解析分段；
-    // 若已是纯文本，parseHtml 也能安全处理
-    const text = parsed.includes("<") ? blockTextOf(parseHtml(parsed)) : parsed;
-    const paragraphs = toParagraphs(text);
-    if (paragraphs.length === 0) throw new Error("正文为空");
+
+    const paragraphs: string[] = [];
+    const visited = new Set<string>();
+    let pageUrl: string | null = chapter.externalKey;
+    let pages = 0;
+
+    while (pageUrl && pages < maxContentPages) {
+      if (visited.has(pageUrl)) break;
+      visited.add(pageUrl);
+      pages += 1;
+
+      const doc = await loadDoc(ctx, pageUrl);
+      const parsed = evalRuleOne(doc, config.contentRule);
+      if (parsed) {
+        // 正文规则多为 @html/@content，取出来的是 HTML 片段，需再解析分段；
+        // 若已是纯文本，parseHtml 也能安全处理
+        const text = parsed.includes("<") ? blockTextOf(parseHtml(parsed)) : parsed;
+        paragraphs.push(...toParagraphs(text));
+      }
+
+      pageUrl = config.nextContentUrl
+        ? nextPageUrl(doc, config.nextContentUrl, pageUrl, visited)
+        : null;
+      if (pageUrl) await delay(politeDelayMs);
+    }
+
+    if (paragraphs.length === 0) throw new Error("正文规则未命中内容");
     return { paragraphs };
   },
 };

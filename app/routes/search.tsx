@@ -31,16 +31,25 @@ export async function loader({ request, context }: Route.LoaderArgs) {
    * Workers 资源上限（Error 1102）。分批后每批 8 个源，页面先出本站结果，
    * 源结果陆续补上。
    */
-  const [results, enabled] = await Promise.all([
+  /**
+   * 源数量查询单独 catch。
+   *
+   * 在线源是附加能力，不能让它拖垮站内搜索：这张表缺失或查询出错时
+   * （例如迁移还没应用），原先会让整个搜索页渲染成"页面出错了"，
+   * 连本站书库结果都看不到。
+   */
+  const [results, sourceCount] = await Promise.all([
     searchBooks(db, q, 30),
     db
       .select({ count: sql<number>`count(*)` })
       .from(contentSources)
       .where(eq(contentSources.status, "enabled"))
-      .get(),
+      .get()
+      .then((row) => Number(row?.count ?? 0))
+      .catch(() => 0),
   ]);
 
-  return { query: q, results, sourceCount: Number(enabled?.count ?? 0) };
+  return { query: q, results, sourceCount };
 }
 
 function toSummary(book: Awaited<ReturnType<typeof searchBooks>>[number]): BookSummary {

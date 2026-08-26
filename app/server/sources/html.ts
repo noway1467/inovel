@@ -178,13 +178,21 @@ interface SimpleSelector {
   id?: string;
   classes: string[];
   attrs: { name: string; value?: string; op?: "=" | "*=" | "^=" | "$=" }[];
-  /** :eq(n) / :nth-child 简化支持，负数表示从后往前 */
+  /** :eq(n)，负数表示从后往前 */
   index?: number;
+  /** :gt(n) 取下标大于 n 的 */
+  gt?: number;
+  /** :lt(n) 取下标小于 n 的 */
+  lt?: number;
+  /** [from:to] 区间，含两端，负数从后计 */
+  range?: { from: number; to: number };
+  /** :contains(文本) / text.关键字 —— 后代文本包含该串 */
+  contains?: string;
 }
 
 interface CompoundSelector {
-  /** 组合子：" " 后代，">" 直接子 */
-  combinator: " " | ">";
+  /** 组合子：" " 后代，">" 直接子，"+" 紧邻兄弟 */
+  combinator: " " | ">" | "+";
   selector: SimpleSelector;
 }
 
@@ -192,9 +200,23 @@ function parseSimple(raw: string): SimpleSelector {
   const selector: SimpleSelector = { classes: [], attrs: [] };
   let rest = raw;
 
+  // :contains(文本) —— jsoup 方言，书源里用来定位「下一页」这类链接
+  rest = rest.replace(/:contains(?:Own)?\(([^)]*)\)/gi, (_m, value: string) => {
+    selector.contains = value.replace(/^['"]|['"]$/g, "");
+    return "";
+  });
+
   // :eq(3) / :first / :last
   rest = rest.replace(/:eq\((-?\d+)\)/g, (_m, n: string) => {
     selector.index = Number.parseInt(n, 10);
+    return "";
+  });
+  rest = rest.replace(/:gt\((-?\d+)\)/g, (_m, n: string) => {
+    selector.gt = Number.parseInt(n, 10);
+    return "";
+  });
+  rest = rest.replace(/:lt\((-?\d+)\)/g, (_m, n: string) => {
+    selector.lt = Number.parseInt(n, 10);
     return "";
   });
   rest = rest.replace(/:first\b/g, () => {
@@ -203,6 +225,12 @@ function parseSimple(raw: string): SimpleSelector {
   });
   rest = rest.replace(/:last\b/g, () => {
     selector.index = -1;
+    return "";
+  });
+
+  // [1:-2] 区间。必须在属性选择器之前处理，否则会被当成属性名
+  rest = rest.replace(/\[(-?\d+):(-?\d+)\]/g, (_m, from: string, to: string) => {
+    selector.range = { from: Number.parseInt(from, 10), to: Number.parseInt(to, 10) };
     return "";
   });
 
@@ -232,23 +260,37 @@ function parseSimple(raw: string): SimpleSelector {
 function parseSelector(raw: string): CompoundSelector[] {
   const tokens = raw.trim().split(/\s+/).filter(Boolean);
   const parts: CompoundSelector[] = [];
-  let pendingCombinator: " " | ">" = " ";
+  let pendingCombinator: " " | ">" | "+" = " ";
+
   for (const token of tokens) {
-    if (token === ">") {
-      pendingCombinator = ">";
+    if (token === ">" || token === "+") {
+      pendingCombinator = token;
       continue;
     }
-    // 允许 a>b 不带空格
-    const segments = token.split(">").filter(Boolean);
-    segments.forEach((segment, i) => {
-      parts.push({
-        combinator: i === 0 ? pendingCombinator : ">",
-        selector: parseSimple(segment),
-      });
-    });
+    // 允许 a>b、a+b 不带空格：按组合子切开并保留它
+    const segments = token.split(/([>+])/).filter(Boolean);
+    let nextCombinator: " " | ">" | "+" = pendingCombinator;
+    for (const segment of segments) {
+      if (segment === ">" || segment === "+") {
+        nextCombinator = segment;
+        continue;
+      }
+      parts.push({ combinator: nextCombinator, selector: parseSimple(segment) });
+      nextCombinator = " ";
+    }
     pendingCombinator = " ";
   }
   return parts;
+}
+
+/** 元素及其后代的全部文本，用于 :contains 判定 */
+function elementText(node: XmlNode): string {
+  let out = "";
+  for (const child of node.children) {
+    if (child.name === textNodeName) out += child.text;
+    else out += elementText(child);
+  }
+  return out;
 }
 
 function matchesSimple(node: XmlNode, selector: SimpleSelector): boolean {
@@ -259,6 +301,7 @@ function matchesSimple(node: XmlNode, selector: SimpleSelector): boolean {
     const list = classList(node);
     if (!selector.classes.every((cls) => list.includes(cls))) return false;
   }
+  if (selector.contains && !elementText(node).includes(selector.contains)) return false;
   for (const attr of selector.attrs) {
     const actual = node.attrs[attr.name];
     if (actual === undefined) return false;
@@ -287,11 +330,60 @@ function descendants(node: XmlNode): XmlNode[] {
   return out;
 }
 
-function applyIndex(nodes: XmlNode[], index: number | undefined): XmlNode[] {
-  if (index === undefined) return nodes;
-  const resolved = index < 0 ? nodes.length + index : index;
-  const picked = nodes[resolved];
-  return picked ? [picked] : [];
+/** 按 :eq / :gt / :lt / [from:to] 裁剪命中集 */
+function applyPositional(nodes: XmlNode[], selector: SimpleSelector): XmlNode[] {
+  let out = nodes;
+
+  if (selector.range) {
+    const size = out.length;
+    const resolve = (at: number) => (at < 0 ? size + at : at);
+    const from = Math.max(0, resolve(selector.range.from));
+    const to = Math.min(size - 1, resolve(selector.range.to));
+    out = from <= to ? out.slice(from, to + 1) : [];
+  }
+  if (selector.gt !== undefined) {
+    const at = selector.gt < 0 ? out.length + selector.gt : selector.gt;
+    out = out.slice(at + 1);
+  }
+  if (selector.lt !== undefined) {
+    const at = selector.lt < 0 ? out.length + selector.lt : selector.lt;
+    out = out.slice(0, Math.max(0, at));
+  }
+  if (selector.index !== undefined) {
+    const at = selector.index < 0 ? out.length + selector.index : selector.index;
+    const picked = out[at];
+    out = picked ? [picked] : [];
+  }
+  return out;
+}
+
+/** 紧邻兄弟：取每个节点的下一个元素兄弟 */
+function nextSiblings(scope: XmlNode, root: XmlNode): XmlNode[] {
+  const parent = findParent(root, scope);
+  if (!parent) return [];
+  const siblings = elementsOf(parent);
+  const at = siblings.indexOf(scope);
+  if (at === -1 || at === siblings.length - 1) return [];
+  const next = siblings[at + 1];
+  return next ? [next] : [];
+}
+
+/** 反查父节点。树上没有 parent 指针，需要自顶向下找一次。 */
+function findParent(root: XmlNode, target: XmlNode): XmlNode | null {
+  let found: XmlNode | null = null;
+  const walk = (current: XmlNode) => {
+    if (found) return;
+    for (const child of elementsOf(current)) {
+      if (child === target) {
+        found = current;
+        return;
+      }
+      walk(child);
+      if (found) return;
+    }
+  };
+  walk(root);
+  return found;
 }
 
 /** CSS 子集查询：标签、#id、.class、后代、直接子、属性、:eq/:first/:last */
@@ -320,7 +412,12 @@ export function queryAll(root: XmlNode, selectorText: string): XmlNode[] {
     const next: XmlNode[] = [];
     const seen = new Set<XmlNode>();
     for (const scope of current) {
-      const candidates = part.combinator === ">" ? elementsOf(scope) : descendants(scope);
+      const candidates =
+        part.combinator === ">"
+          ? elementsOf(scope)
+          : part.combinator === "+"
+            ? nextSiblings(scope, root)
+            : descendants(scope);
       for (const candidate of candidates) {
         if (matchesSimple(candidate, part.selector) && !seen.has(candidate)) {
           seen.add(candidate);
@@ -328,7 +425,7 @@ export function queryAll(root: XmlNode, selectorText: string): XmlNode[] {
         }
       }
     }
-    current = applyIndex(next, part.selector.index);
+    current = applyPositional(next, part.selector);
     if (current.length === 0) return [];
   }
   return current;
