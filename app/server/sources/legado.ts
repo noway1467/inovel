@@ -84,6 +84,29 @@ function clean(value: unknown): string | null {
   return trimmed ? trimmed : null;
 }
 
+/**
+ * 判断地址模板是否需要 JS 求值。
+ *
+ * 单纯的 {{key}} / {{searchKey}} 占位是纯文本替换，可以直接用；
+ * 但含赋值、方法调用（java.ajax、source.getKey 等）的就要执行 JS。
+ */
+export function needsJsEvaluation(template: string): boolean {
+  const trimmed = template.trim();
+  // 整段就是脚本：@js: 前缀、<js> 包裹，或直接以 var/function 开头
+  if (/^@js:/i.test(trimmed) || trimmed.includes("<js>")) return true;
+  if (/^(var|let|const|function)\s/.test(trimmed)) return true;
+  // 出现 Legado 注入的宿主对象，说明要执行脚本
+  if (/\b(java|source|cookie|cache|result)\s*\./.test(trimmed)) return true;
+
+  const placeholders = trimmed.match(/\{\{[\s\S]*?\}\}/g);
+  if (!placeholders) return false;
+  // 纯占位（{{key}}）是文本替换，可以直接用；带表达式的则需要求值
+  return placeholders.some((raw) => {
+    const body = raw.slice(2, -2).trim();
+    return !/^(key|searchKey|page)$/i.test(body);
+  });
+}
+
 /** 校验规则可被引擎理解；不可用时记为警告并返回 null */
 function validate(rule: string | null, label: string, warnings: string[]): string | null {
   if (!rule) return null;
@@ -116,13 +139,15 @@ export function convertLegadoSource(raw: unknown): ConversionResult {
   const warnings: string[] = [];
 
   const tocList = clean(source.ruleToc?.chapterList);
-  const tocName = clean(source.ruleToc?.chapterName);
-  const tocUrl = clean(source.ruleToc?.chapterUrl);
+  // chapterName/chapterUrl 常写成裸属性名（"text" / "href"），
+  // 缺失时按这两个默认值兜底 —— 真实书源里很常见
+  const tocName = clean(source.ruleToc?.chapterName) ?? (tocList ? "text" : null);
+  const tocUrl = clean(source.ruleToc?.chapterUrl) ?? (tocList ? "href" : null);
   const contentRule = clean(source.ruleContent?.content);
 
   if (!tocList || !tocName || !tocUrl) {
     throw new LegadoConversionError(
-      "缺少目录规则（ruleToc.chapterList / chapterName / chapterUrl），无法做增量更新"
+      "缺少目录规则（ruleToc.chapterList），无法做增量更新。有声源与仅供发现页的源通常没有这项。"
     );
   }
   if (!contentRule) {
@@ -144,8 +169,16 @@ export function convertLegadoSource(raw: unknown): ConversionResult {
     }
   }
 
+  // searchUrl 含 {{...}} JS 模板的占近四成。这类源目录与正文仍可用，
+  // 只是不能搜索 —— 记为警告并丢弃搜索能力，不整源拒绝
+  const rawSearchUrl = clean(source.searchUrl);
+  const searchUrlUsable = rawSearchUrl ? !needsJsEvaluation(rawSearchUrl) : false;
+  if (rawSearchUrl && !searchUrlUsable) {
+    warnings.push("搜索地址需要 JS 求值，已禁用该源的搜索；目录与正文不受影响");
+  }
+
   const config: RulesConfig = {
-    searchUrl: clean(source.searchUrl),
+    searchUrl: searchUrlUsable ? rawSearchUrl : null,
     searchList: validate(clean(source.ruleSearch?.bookList), "搜索列表", warnings),
     searchName: validate(clean(source.ruleSearch?.name), "搜索结果书名", warnings),
     searchAuthor: validate(clean(source.ruleSearch?.author), "搜索结果作者", warnings),

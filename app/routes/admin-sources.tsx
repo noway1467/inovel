@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router";
-import { CloudDownload, Loader2, Plus, RefreshCw, Trash2 } from "lucide-react";
+import {
+  CloudDownload,
+  Loader2,
+  Plus,
+  RefreshCw,
+  Search as SearchIcon,
+  Trash2,
+} from "lucide-react";
 import type { Route } from "./+types/admin-sources";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
@@ -102,6 +109,9 @@ export default function AdminSourcesPage({ loaderData }: Route.ComponentProps) {
   const [runs, setRuns] = useState<RunRow[]>([]);
   const [restrictionEnabled, setRestrictionEnabled] = useState(false);
   const [quickResult, setQuickResult] = useState<QuickImportResult | null>(null);
+  const [batchResult, setBatchResult] = useState<BatchImportResult | null>(null);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [filter, setFilter] = useState<SourceFilter>({ q: "", kind: "", status: "" });
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -109,8 +119,14 @@ export default function AdminSourcesPage({ loaderData }: Route.ComponentProps) {
 
   const loadAll = useCallback(async () => {
     if (!isAdmin) return;
+    const params = new URLSearchParams();
+    if (filter.q.trim()) params.set("q", filter.q.trim());
+    if (filter.kind) params.set("kind", filter.kind);
+    if (filter.status) params.set("status", filter.status);
+    const listUrl = `/api/admin/sources/list${params.toString() ? `?${params}` : ""}`;
+
     const [main, domainRes, subRes, runRes] = (await Promise.all([
-      fetch("/api/admin/sources/list").then((r) => r.json()),
+      fetch(listUrl).then((r) => r.json()),
       fetch("/api/admin/sources/domains").then((r) => r.json()),
       fetch("/api/admin/sources/subscriptions").then((r) => r.json()),
       fetch("/api/admin/sources/runs").then((r) => r.json()),
@@ -126,7 +142,7 @@ export default function AdminSourcesPage({ loaderData }: Route.ComponentProps) {
     setRestrictionEnabled(Boolean(domainRes.restrictionEnabled));
     setSubscriptions(subRes.subscriptions ?? []);
     setRuns(runRes.runs ?? []);
-  }, [isAdmin]);
+  }, [isAdmin, filter]);
 
   useEffect(() => {
     void loadAll();
@@ -194,11 +210,21 @@ export default function AdminSourcesPage({ loaderData }: Route.ComponentProps) {
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList>
           <TabsTrigger value="sources">源（{sources.length}）</TabsTrigger>
+          <TabsTrigger value="search">跨源搜书</TabsTrigger>
           <TabsTrigger value="quick">导入并订阅</TabsTrigger>
           <TabsTrigger value="subscriptions">订阅（{subscriptions.length}）</TabsTrigger>
           <TabsTrigger value="runs">同步记录</TabsTrigger>
           <TabsTrigger value="domains">域名限定</TabsTrigger>
         </TabsList>
+
+        <TabsContent value="search">
+          <AggregateSearchPanel
+            busy={busy}
+            onSubscribe={(body) =>
+              call("/api/admin/sources/subscribe", { method: "POST", body: JSON.stringify(body) }, "已订阅并拉取目录")
+            }
+          />
+        </TabsContent>
 
         <TabsContent value="quick" className="space-y-4">
           <QuickImportForm
@@ -217,14 +243,52 @@ export default function AdminSourcesPage({ loaderData }: Route.ComponentProps) {
         </TabsContent>
 
         <TabsContent value="sources" className="space-y-4">
+          <UrlImportForm
+            busy={busy}
+            result={batchResult}
+            onSubmit={async (body) => {
+              const data = (await call(
+                "/api/admin/sources/batch-import",
+                { method: "POST", body: JSON.stringify(body) },
+                "批量导入完成"
+              )) as BatchImportResult | null;
+              setBatchResult(data);
+            }}
+          />
           <SourceCreateForm adapters={adapters} busy={busy} onSubmit={(body) =>
             call("/api/admin/sources/create", { method: "POST", body: JSON.stringify(body) }, "源已登记")
           } />
-          <LegadoImportForm busy={busy} onSubmit={(text) =>
-            call("/api/admin/sources/import-legado", { method: "POST", body: JSON.stringify({ text }) }, "导入完成")
-          } />
+          <SourceFilterBar
+            filter={filter}
+            adapters={adapters}
+            onChange={(next) => setFilter(next)}
+          />
+          <BulkBar
+            sources={sources}
+            selected={selected}
+            busy={busy}
+            onToggleAll={(checked) =>
+              setSelected(checked ? sources.map((source) => source.id) : [])
+            }
+            onAction={async (action) => {
+              await call(
+                "/api/admin/sources/bulk",
+                { method: "POST", body: JSON.stringify({ sourceIds: selected, action }) },
+                `批量${action === "delete" ? "删除" : action === "enable" ? "启用" : "停用"}完成`
+              );
+              setSelected([]);
+            }}
+          />
           <SourceList
             sources={sources}
+            selected={selected}
+            onToggleSelect={(sourceId) =>
+              setSelected((prev) =>
+                prev.includes(sourceId)
+                  ? prev.filter((id) => id !== sourceId)
+                  : [...prev, sourceId]
+              )
+            }
             busy={busy}
             onProbe={(sourceId) =>
               call("/api/admin/sources/probe", { method: "POST", body: JSON.stringify({ sourceId }) }, "已测试连通性")
@@ -501,40 +565,6 @@ function SourceCreateForm({
   );
 }
 
-function LegadoImportForm({
-  busy,
-  onSubmit,
-}: {
-  busy: boolean;
-  onSubmit: (text: string) => Promise<unknown>;
-}) {
-  const [text, setText] = useState("");
-
-  return (
-    <section className="rounded-lg border border-border bg-surface p-4">
-      <h2 className="flex items-center gap-2 text-base font-semibold">
-        <CloudDownload className="size-4" />
-        导入书源 JSON（兼容开源阅读格式）
-      </h2>
-      <p className="mt-1 text-xs text-muted-foreground">
-        粘贴单个或数组形式的书源 JSON。只支持 CSS 规则；用到 JS / JSONPath / XPath 的书源会被跳过并说明原因。
-        导入后域名仍需单独授权才会开始抓取。
-      </p>
-      <Textarea
-        className="mt-3 font-mono text-xs"
-        rows={6}
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        placeholder='[{"bookSourceName":"...","bookSourceUrl":"https://...","ruleToc":{...},"ruleContent":{...}}]'
-      />
-      <Button className="mt-3" disabled={busy || !text.trim()} onClick={() => void onSubmit(text)}>
-        {busy && <Loader2 className="size-4 animate-spin" />}
-        解析并导入
-      </Button>
-    </section>
-  );
-}
-
 function DomainForm({
   busy,
   onSubmit,
@@ -580,6 +610,398 @@ function DomainForm({
         添加
       </Button>
     </section>
+  );
+}
+
+interface SourceFilter {
+  q: string;
+  kind: string;
+  status: string;
+}
+
+interface BatchImportResult {
+  format: string;
+  finalUrl: string | null;
+  bytes: number | null;
+  created: { name: string; kind: string; status: string }[];
+  reused: { name: string }[];
+  rejected: { name: string; reason: string }[];
+  warned: { name: string; warnings: string[] }[];
+  totals: { parsed: number; created: number; reused: number; rejected: number };
+}
+
+/** 从清单地址或粘贴的 JSON 批量导入；书源与订阅源自动判别 */
+function UrlImportForm({
+  busy,
+  result,
+  onSubmit,
+}: {
+  busy: boolean;
+  result: BatchImportResult | null;
+  onSubmit: (body: Record<string, unknown>) => Promise<void>;
+}) {
+  const [mode, setMode] = useState<"url" | "text">("url");
+  const [url, setUrl] = useState("");
+  const [text, setText] = useState("");
+  const [showRejected, setShowRejected] = useState(false);
+
+  const canSubmit = mode === "url" ? url.trim().length > 0 : text.trim().length > 0;
+
+  return (
+    <section className="rounded-lg border border-border bg-surface p-4">
+      <h2 className="flex items-center gap-2 text-base font-semibold">
+        <CloudDownload className="size-4" />
+        批量导入源
+      </h2>
+      <p className="mt-1 text-xs text-muted-foreground">
+        直接填清单地址即可，会自动跟随跳转（书源站通常 302 到 CDN）。
+        书源与订阅源按字段自动判别，同地址的源复用不重复建。
+      </p>
+
+      <div className="mt-3 flex gap-2">
+        <Button size="sm" variant={mode === "url" ? "default" : "secondary"} onClick={() => setMode("url")}>
+          清单地址
+        </Button>
+        <Button size="sm" variant={mode === "text" ? "default" : "secondary"} onClick={() => setMode("text")}>
+          粘贴 JSON
+        </Button>
+      </div>
+
+      {mode === "url" ? (
+        <div className="mt-3 space-y-1.5">
+          <Label htmlFor="bi-url">清单地址</Label>
+          <Input
+            id="bi-url"
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            placeholder="https://example.com/shuyuans/json/id/1244.json"
+          />
+        </div>
+      ) : (
+        <div className="mt-3 space-y-1.5">
+          <Label htmlFor="bi-text">清单 JSON</Label>
+          <Textarea
+            id="bi-text"
+            className="font-mono text-xs"
+            rows={5}
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+          />
+        </div>
+      )}
+
+      <Button
+        className="mt-3"
+        disabled={busy || !canSubmit}
+        onClick={() => void onSubmit(mode === "url" ? { url } : { text })}
+      >
+        {busy && <Loader2 className="size-4 animate-spin" />}
+        导入
+      </Button>
+
+      {result && (
+        <div className="mt-4 space-y-1.5 border-t border-border pt-3 text-sm">
+          <p className="font-medium">
+            解析 {result.totals.parsed} 个 · 新建 {result.totals.created} · 复用{" "}
+            {result.totals.reused} · 跳过 {result.totals.rejected}
+          </p>
+          <p className="text-xs text-muted-foreground">
+            格式：{result.format === "bookSource" ? "书源" : result.format === "rssSource" ? "订阅源" : result.format}
+            {result.bytes !== null && ` · ${(result.bytes / 1024).toFixed(0)} KB`}
+          </p>
+          {result.finalUrl && (
+            <p className="truncate text-xs text-muted-foreground">实际地址：{result.finalUrl}</p>
+          )}
+          {result.warned.length > 0 && (
+            <p className="text-xs text-muted-foreground">
+              {result.warned.length} 个源有降级（多为搜索需 JS 求值，目录与正文不受影响）
+            </p>
+          )}
+          {result.totals.rejected > 0 && (
+            <div>
+              <Button size="sm" variant="ghost" onClick={() => setShowRejected((v) => !v)}>
+                {showRejected ? "收起" : `查看 ${result.totals.rejected} 个跳过原因`}
+              </Button>
+              {showRejected && (
+                <ul className="mt-1 max-h-56 space-y-0.5 overflow-y-auto text-xs text-muted-foreground">
+                  {result.rejected.map((item, i) => (
+                    <li key={`${item.name}-${i}`}>
+                      {item.name}：{item.reason}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+interface GroupedBook {
+  title: string;
+  author: string | null;
+  description: string | null;
+  options: { sourceId: string; sourceName: string; externalId: string }[];
+}
+
+interface AggregateResult {
+  keyword: string;
+  books: GroupedBook[];
+  outcomes: { sourceId: string; sourceName: string; status: string; hits: number; message?: string }[];
+  totals: { sourcesQueried: number; sourcesOk: number; hits: number; books: number };
+}
+
+/** 跨源搜书：一次问所有启用的源，同名书合并 */
+function AggregateSearchPanel({
+  busy,
+  onSubscribe,
+}: {
+  busy: boolean;
+  onSubscribe: (body: Record<string, unknown>) => Promise<unknown>;
+}) {
+  const [keyword, setKeyword] = useState("");
+  const [searching, setSearching] = useState(false);
+  const [result, setResult] = useState<AggregateResult | null>(null);
+  const [error, setError] = useState("");
+  const [showOutcomes, setShowOutcomes] = useState(false);
+
+  async function search() {
+    if (!keyword.trim()) return;
+    setSearching(true);
+    setError("");
+    setResult(null);
+    try {
+      const response = await fetch("/api/admin/sources/aggregate-search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ keyword }),
+      });
+      const data = (await response.json()) as AggregateResult & { error?: string };
+      if (!response.ok) {
+        setError(data.error ?? "搜索失败");
+        return;
+      }
+      setResult(data);
+    } finally {
+      setSearching(false);
+    }
+  }
+
+  return (
+    <section className="space-y-4">
+      <div className="rounded-lg border border-border bg-surface p-4">
+        <h2 className="flex items-center gap-2 text-base font-semibold">
+          <SearchIcon className="size-4" />
+          跨源搜书
+        </h2>
+        <p className="mt-1 text-xs text-muted-foreground">
+          同时查询所有已启用且支持搜索的源，同名同作者的结果合并成一条，
+          多源命中的排在前面。单个源超时或失败不影响其他源。
+        </p>
+        <div className="mt-3 flex gap-2">
+          <Input
+            value={keyword}
+            onChange={(e) => setKeyword(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void search();
+            }}
+            placeholder="输入书名或作者"
+          />
+          <Button disabled={searching || !keyword.trim()} onClick={() => void search()}>
+            {searching ? <Loader2 className="size-4 animate-spin" /> : "搜索"}
+          </Button>
+        </div>
+        {error && <p className="mt-2 text-sm text-danger">{error}</p>}
+      </div>
+
+      {result && (
+        <>
+          <div className="rounded-lg border border-border bg-surface/60 p-3 text-xs text-muted-foreground">
+            查询 {result.totals.sourcesQueried} 个源，{result.totals.sourcesOk} 个返回结果 ·
+            共 {result.totals.hits} 条命中，合并为 {result.totals.books} 本
+            <Button size="sm" variant="ghost" onClick={() => setShowOutcomes((v) => !v)}>
+              {showOutcomes ? "收起各源状态" : "查看各源状态"}
+            </Button>
+            {showOutcomes && (
+              <ul className="mt-1.5 max-h-48 space-y-0.5 overflow-y-auto">
+                {result.outcomes.map((outcome) => (
+                  <li key={outcome.sourceId}>
+                    {outcome.status === "ok" ? "✓" : "✗"} {outcome.sourceName}（{outcome.status}
+                    {outcome.hits > 0 && `，${outcome.hits} 条`}
+                    {outcome.message && `：${outcome.message}`}）
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          {result.books.length === 0 ? (
+            <EmptyState title="没有结果" description="换个关键字，或确认已启用支持搜索的源。" />
+          ) : (
+            <ul className="space-y-2">
+              {result.books.map((book, i) => (
+                <li key={`${book.title}-${i}`} className="rounded-lg border border-border bg-surface p-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-medium">{book.title}</span>
+                    {book.author && (
+                      <span className="text-xs text-muted-foreground">{book.author}</span>
+                    )}
+                    <Badge variant="secondary">{book.options.length} 个源</Badge>
+                  </div>
+                  {book.description && (
+                    <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
+                      {book.description}
+                    </p>
+                  )}
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {book.options.map((option) => (
+                      <Button
+                        key={`${option.sourceId}-${option.externalId}`}
+                        size="sm"
+                        variant="secondary"
+                        disabled={busy}
+                        onClick={() =>
+                          void onSubscribe({
+                            sourceId: option.sourceId,
+                            externalId: option.externalId,
+                            title: book.title,
+                            author: book.author,
+                            description: book.description,
+                          })
+                        }
+                      >
+                        从「{option.sourceName}」订阅
+                      </Button>
+                    ))}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
+/** 源筛选。导入一份合集就是几百个，没筛选没法管 */
+function SourceFilterBar({
+  filter,
+  adapters,
+  onChange,
+}: {
+  filter: SourceFilter;
+  adapters: AdapterInfo[];
+  onChange: (next: SourceFilter) => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-end gap-2 rounded-lg border border-border bg-surface p-3">
+      <div className="min-w-48 flex-1 space-y-1.5">
+        <Label htmlFor="flt-q">按名称或地址搜索</Label>
+        <Input
+          id="flt-q"
+          value={filter.q}
+          onChange={(e) => onChange({ ...filter, q: e.target.value })}
+          placeholder="源名称或域名"
+        />
+      </div>
+      <div className="w-40 space-y-1.5">
+        <Label htmlFor="flt-kind">类型</Label>
+        <Select
+          value={filter.kind || "all"}
+          onValueChange={(value) => onChange({ ...filter, kind: value === "all" ? "" : value })}
+        >
+          <SelectTrigger id="flt-kind">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">全部</SelectItem>
+            {adapters.map((adapter) => (
+              <SelectItem key={adapter.kind} value={adapter.kind}>
+                {adapter.kind}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+      <div className="w-40 space-y-1.5">
+        <Label htmlFor="flt-status">状态</Label>
+        <Select
+          value={filter.status || "all"}
+          onValueChange={(value) => onChange({ ...filter, status: value === "all" ? "" : value })}
+        >
+          <SelectTrigger id="flt-status">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">全部</SelectItem>
+            <SelectItem value="enabled">已启用</SelectItem>
+            <SelectItem value="disabled">已停用</SelectItem>
+            <SelectItem value="blocked">被限定挡下</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+    </div>
+  );
+}
+
+/** 批量操作条 */
+function BulkBar({
+  sources,
+  selected,
+  busy,
+  onToggleAll,
+  onAction,
+}: {
+  sources: SourceRow[];
+  selected: string[];
+  busy: boolean;
+  onToggleAll: (checked: boolean) => void;
+  onAction: (action: "enable" | "disable" | "delete") => Promise<void>;
+}) {
+  const allChecked = sources.length > 0 && selected.length === sources.length;
+  return (
+    <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-surface p-3">
+      <label className="flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          className="size-4 accent-primary"
+          checked={allChecked}
+          onChange={(e) => onToggleAll(e.target.checked)}
+        />
+        全选（当前 {sources.length} 个）
+      </label>
+      <span className="text-sm text-muted-foreground">已选 {selected.length}</span>
+      <div className="ml-auto flex gap-2">
+        <Button
+          size="sm"
+          variant="secondary"
+          disabled={busy || selected.length === 0}
+          onClick={() => void onAction("enable")}
+        >
+          批量启用
+        </Button>
+        <Button
+          size="sm"
+          variant="secondary"
+          disabled={busy || selected.length === 0}
+          onClick={() => void onAction("disable")}
+        >
+          批量停用
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          disabled={busy || selected.length === 0}
+          onClick={() => void onAction("delete")}
+        >
+          <Trash2 className="size-4" />
+          批量删除
+        </Button>
+      </div>
+    </div>
   );
 }
 
@@ -773,6 +1195,8 @@ function QuickImportForm({
 
 function SourceList({
   sources,
+  selected,
+  onToggleSelect,
   busy,
   onProbe,
   onToggle,
@@ -781,6 +1205,8 @@ function SourceList({
   onSubscribe,
 }: {
   sources: SourceRow[];
+  selected: string[];
+  onToggleSelect: (sourceId: string) => void;
   busy: boolean;
   onProbe: (sourceId: string) => Promise<unknown>;
   onToggle: (sourceId: string, status: "enabled" | "disabled") => Promise<unknown>;
@@ -825,6 +1251,13 @@ function SourceList({
       {sources.map((source) => (
         <div key={source.id} className="rounded-lg border border-border bg-surface p-3">
           <div className="flex flex-wrap items-center gap-2">
+            <input
+              type="checkbox"
+              aria-label={`选择 ${source.name}`}
+              className="size-4 accent-primary"
+              checked={selected.includes(source.id)}
+              onChange={() => onToggleSelect(source.id)}
+            />
             <span className="font-medium">{source.name}</span>
             <Badge
               variant={

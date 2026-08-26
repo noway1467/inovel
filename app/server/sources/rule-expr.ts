@@ -1,18 +1,27 @@
 import { innerHtml, queryAll } from "~/server/sources/html";
+import {
+  evalJsonPath,
+  isJsonPath,
+  jsonValueToText,
+  type JsonValue,
+} from "~/server/sources/json-path";
 import { textNodeName, textOf, type XmlNode } from "~/server/sources/xml";
 
 /**
- * 规则表达式求值，兼容开源阅读（Legado）书源的选择器方言。
+ * 规则表达式求值，兼容开源阅读（Legado）书源方言。
  *
- * 支持的形态：
- *   class.listmain@tag.dd@tag.a@text     经典点号方言 + @ 链式
- *   @css:.chapters li a@href             显式 CSS
- *   #content@html                        id 简写
- *   tag.div.2@text                       同名标签取第 3 个（0 基）
- *   ...@text##第\d+章\s*##                尾部 ##正则##替换 清洗
+ * 支持：
+ *   class.listmain@tag.dd@tag.a@text   点号方言 + @ 链
+ *   @css:.chapters li a@href           显式 CSS
+ *   #content@html                      id 简写
+ *   tag.div.2@text                     同名标签取第 3 个（0 基）
+ *   em.-1@text                         负索引从后取
+ *   option!0@value                     排除第 0 个（支持 !0,2 与 !0:2 区间）
+ *   img@data-original||img@src         || 备选：前者取空则用后者
+ *   $.data.list[0].name                JSONPath，用于 JSON 接口源
+ *   ...@text##第\d+章\s*##              尾部正则清洗
  *
- * 不支持（遇到时明确报错，不静默出错）：JS 表达式 `<js>`、JSONPath `$.`、
- * XPath `//`。这些在书源里通常用于反爬对抗，超出本地规则引擎范畴。
+ * 不支持：<js> 求值（Workers 里没有安全沙箱）、XPath。
  */
 
 export type ExtractTarget =
@@ -22,11 +31,32 @@ export type ExtractTarget =
   | { kind: "attr"; name: string }
   | { kind: "element" };
 
-export interface ParsedRule {
-  /** 翻译后的 CSS 选择器；空串表示作用于当前节点自身 */
+/** 被求值的文档：HTML 树或 JSON 值 */
+export type RuleDoc =
+  | { kind: "html"; node: XmlNode }
+  | { kind: "json"; value: JsonValue };
+
+export function htmlDoc(node: XmlNode): RuleDoc {
+  return { kind: "html", node };
+}
+
+export function jsonDoc(value: JsonValue): RuleDoc {
+  return { kind: "json", value };
+}
+
+/** || 分隔出的一个备选分支 */
+export interface SingleRule {
   selector: string;
   target: ExtractTarget;
-  /** ##pattern##replacement 清洗，可多段 */
+  /** 非空时走 JSONPath 分支 */
+  jsonPath: string | null;
+  /** !n 排除的下标，负数表示从后计 */
+  excludeIndexes: number[];
+}
+
+export interface ParsedRule {
+  /** 按顺序尝试，第一个有结果的生效 */
+  alternatives: SingleRule[];
   cleanups: { pattern: RegExp; replacement: string }[];
 }
 
@@ -38,8 +68,32 @@ const attrTargets: Record<string, ExtractTarget> = {
   html: { kind: "html" },
   all: { kind: "html" },
   content: { kind: "html" },
-  ownText: { kind: "text" },
+  owntext: { kind: "text" },
 };
+
+/** 解析 !0,2 与 !0:2 形式的排除下标 */
+function parseExclusions(raw: string): { body: string; excludes: number[] } {
+  const excludes: number[] = [];
+  const body = raw.replace(/!(-?\d+(?::-?\d+)?(?:,-?\d+(?::-?\d+)?)*)/g, (_m, spec: string) => {
+    for (const part of spec.split(",")) {
+      if (part.includes(":")) {
+        const [fromRaw, toRaw] = part.split(":");
+        const from = Number.parseInt(fromRaw ?? "", 10);
+        const to = Number.parseInt(toRaw ?? "", 10);
+        if (Number.isFinite(from) && Number.isFinite(to)) {
+          const lo = Math.min(from, to);
+          const hi = Math.max(from, to);
+          for (let i = lo; i <= hi; i += 1) excludes.push(i);
+        }
+        continue;
+      }
+      const at = Number.parseInt(part, 10);
+      if (Number.isFinite(at)) excludes.push(at);
+    }
+    return "";
+  });
+  return { body, excludes };
+}
 
 /** 点号方言的一段翻译成 CSS：class.name.2 → .name:eq(2) */
 function segmentToCss(segment: string): string {
@@ -68,7 +122,7 @@ function segmentToCss(segment: string): string {
       // text.关键字 是"包含该文本的节点"，CSS 无对应能力
       throw new UnsupportedRuleError(`不支持按文本内容筛选：${trimmed}`);
     default:
-      // 裸标签名，可能带索引：div.2
+      // 裸标签名，可能带索引：div.2 / em.-1
       if (parts.length >= 2 && Number.isFinite(Number.parseInt(parts[1] ?? "", 10))) {
         return `${head}:eq(${Number.parseInt(parts[1] ?? "0", 10)})`;
       }
@@ -79,7 +133,6 @@ function segmentToCss(segment: string): string {
 function parseCleanups(raw: string): { body: string; cleanups: ParsedRule["cleanups"] } {
   const cleanups: ParsedRule["cleanups"] = [];
   let body = raw;
-  // 形如 ##pattern##replacement 或 ##pattern
   const marker = body.indexOf("##");
   if (marker !== -1) {
     const tail = body.slice(marker + 2);
@@ -98,32 +151,27 @@ function parseCleanups(raw: string): { body: string; cleanups: ParsedRule["clean
   return { body, cleanups };
 }
 
-export function parseRule(raw: string): ParsedRule {
-  const input = (raw ?? "").trim();
-  if (!input) throw new UnsupportedRuleError("规则为空");
+/** 解析单个备选分支（不含 || 与 ##） */
+function parseSingle(input: string): SingleRule {
+  const trimmed = input.trim();
+  if (!trimmed) throw new UnsupportedRuleError("规则分支为空");
 
-  if (input.includes("<js>") || input.startsWith("@js:")) {
-    throw new UnsupportedRuleError("不支持 JS 规则（<js>），请改用 CSS 规则");
-  }
-  if (input.startsWith("$.") || input.startsWith("@json:")) {
-    throw new UnsupportedRuleError("不支持 JSONPath 规则");
-  }
-  if (input.startsWith("//") || input.startsWith("@xpath:")) {
-    throw new UnsupportedRuleError("不支持 XPath 规则，请改用 CSS 规则");
+  // JSONPath 分支：整段就是路径，可选 @text 之类的尾巴无意义，直接用路径
+  if (isJsonPath(trimmed)) {
+    return { selector: "", target: { kind: "text" }, jsonPath: trimmed, excludeIndexes: [] };
   }
 
-  const { body, cleanups } = parseCleanups(input);
+  const { body: withoutExcludes, excludes } = parseExclusions(trimmed);
 
-  let working = body.trim();
+  let working = withoutExcludes.trim();
   let explicitCss = false;
   if (working.startsWith("@css:")) {
     working = working.slice(5).trim();
     explicitCss = true;
   }
 
-  // 拆 @ 链。显式 CSS 时只把最后一段当提取目标，前面整体是选择器。
   const segments = working.split("@").map((s) => s.trim()).filter(Boolean);
-  if (segments.length === 0) throw new UnsupportedRuleError(`规则无法解析：${raw}`);
+  if (segments.length === 0) throw new UnsupportedRuleError(`规则无法解析：${input}`);
 
   let target: ExtractTarget = { kind: "text" };
   const last = segments[segments.length - 1] ?? "";
@@ -131,7 +179,7 @@ export function parseRule(raw: string): ParsedRule {
   if (attrTargets[lastLower]) {
     target = attrTargets[lastLower]!;
     segments.pop();
-  } else if (/^(href|src|title|alt|value|data-[\w-]+|content)$/i.test(last)) {
+  } else if (/^(href|src|title|alt|value|content|data-[\w-]+)$/i.test(last)) {
     target = { kind: "attr", name: lastLower };
     segments.pop();
   } else if (lastLower.startsWith("attr.")) {
@@ -143,7 +191,47 @@ export function parseRule(raw: string): ParsedRule {
     ? segments.join(" ")
     : segments.map(segmentToCss).filter(Boolean).join(" ");
 
-  return { selector, target, cleanups };
+  return { selector, target, jsonPath: null, excludeIndexes: excludes };
+}
+
+export function parseRule(raw: string): ParsedRule {
+  const input = (raw ?? "").trim();
+  if (!input) throw new UnsupportedRuleError("规则为空");
+
+  if (input.includes("<js>") || input.startsWith("@js:") || input.includes("{{") ) {
+    throw new UnsupportedRuleError("不支持 JS 规则（<js> 或 {{}} 模板），请改用 CSS 或 JSONPath");
+  }
+  if (input.startsWith("//") || input.startsWith("@xpath:") || input.startsWith("@XPath:")) {
+    throw new UnsupportedRuleError("不支持 XPath 规则，请改用 CSS 规则");
+  }
+
+  // 先剥清洗段，再拆 || —— 否则 ## 里的正则可能含 |
+  const { body, cleanups } = parseCleanups(input);
+  const branches = body
+    .split("||")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (branches.length === 0) throw new UnsupportedRuleError(`规则无法解析：${raw}`);
+
+  /**
+   * 单个分支不支持时丢弃它，只要还有分支可用就不算失败 —— 这正是 ||
+   * 的语义。真实合集里就有 `text.关键字@href||tag.a.0@href` 这种：
+   * 前者用了不支持的文本筛选，后者是能用的普通选择器，整条判失败等于
+   * 白白丢掉一个可用的源。
+   */
+  const alternatives: SingleRule[] = [];
+  let lastError: Error | null = null;
+  for (const branch of branches) {
+    try {
+      alternatives.push(parseSingle(branch));
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+    }
+  }
+  if (alternatives.length === 0) {
+    throw lastError ?? new UnsupportedRuleError(`规则无法解析：${raw}`);
+  }
+  return { alternatives, cleanups };
 }
 
 function applyCleanups(value: string, cleanups: ParsedRule["cleanups"]): string {
@@ -178,26 +266,73 @@ export function extractFrom(node: XmlNode, target: ExtractTarget): string {
   }
 }
 
-/** 求值成单个字符串，取第一个命中 */
-export function evalRuleOne(root: XmlNode, rule: string): string {
-  const parsed = parseRule(rule);
-  const nodes = parsed.selector ? queryAll(root, parsed.selector) : [root];
-  const first = nodes[0];
-  if (!first) return "";
-  return applyCleanups(extractFrom(first, parsed.target), parsed.cleanups);
+function applyExclusions<T>(items: T[], excludes: number[]): T[] {
+  if (excludes.length === 0) return items;
+  const resolved = new Set(excludes.map((at) => (at < 0 ? items.length + at : at)));
+  return items.filter((_, index) => !resolved.has(index));
 }
 
-/** 求值成字符串数组，全部命中 */
-export function evalRuleAll(root: XmlNode, rule: string): string[] {
+/** 求出一个分支命中的节点（HTML）或值（JSON） */
+function evalBranchNodes(doc: RuleDoc, rule: SingleRule): RuleDoc[] {
+  if (rule.jsonPath) {
+    if (doc.kind !== "json") return [];
+    const values = applyExclusions(evalJsonPath(doc.value, rule.jsonPath), rule.excludeIndexes);
+    return values.map((value) => jsonDoc(value));
+  }
+  if (doc.kind !== "html") return [];
+  const nodes = rule.selector ? queryAll(doc.node, rule.selector) : [doc.node];
+  return applyExclusions(nodes, rule.excludeIndexes).map((node) => htmlDoc(node));
+}
+
+function extractDoc(doc: RuleDoc, target: ExtractTarget): string {
+  if (doc.kind === "json") return jsonValueToText(doc.value);
+  return extractFrom(doc.node, target);
+}
+
+/** 求值成单个字符串，按 || 顺序取第一个非空结果 */
+export function evalRuleOne(doc: RuleDoc, rule: string): string {
   const parsed = parseRule(rule);
-  const nodes = parsed.selector ? queryAll(root, parsed.selector) : [root];
-  return nodes
-    .map((node) => applyCleanups(extractFrom(node, parsed.target), parsed.cleanups))
-    .filter((value) => value.length > 0);
+  for (const branch of parsed.alternatives) {
+    const nodes = evalBranchNodes(doc, branch);
+    const first = nodes[0];
+    if (!first) continue;
+    const value = applyCleanups(extractDoc(first, branch.target), parsed.cleanups);
+    // || 的语义是"前者取空则用后者"，所以空串要继续尝试下一分支
+    if (value) return value;
+  }
+  return "";
+}
+
+/** 求值成字符串数组，按 || 顺序取第一个有结果的分支 */
+export function evalRuleAll(doc: RuleDoc, rule: string): string[] {
+  const parsed = parseRule(rule);
+  for (const branch of parsed.alternatives) {
+    const nodes = evalBranchNodes(doc, branch);
+    const values = nodes
+      .map((node) => applyCleanups(extractDoc(node, branch.target), parsed.cleanups))
+      .filter((value) => value.length > 0);
+    if (values.length > 0) return values;
+  }
+  return [];
 }
 
 /** 求值成节点列表，供"列表规则 + 每项子规则"的嵌套提取 */
-export function evalRuleNodes(root: XmlNode, rule: string): XmlNode[] {
+export function evalRuleNodes(doc: RuleDoc, rule: string): RuleDoc[] {
   const parsed = parseRule(rule);
-  return parsed.selector ? queryAll(root, parsed.selector) : [root];
+  for (const branch of parsed.alternatives) {
+    const nodes = evalBranchNodes(doc, branch);
+    if (nodes.length > 0) return nodes;
+  }
+  return [];
 }
+
+/** 规则是否可被本引擎理解 */
+export function canParseRule(rule: string): boolean {
+  try {
+    parseRule(rule);
+    return true;
+  } catch {
+    return false;
+  }
+}
+

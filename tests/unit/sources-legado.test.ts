@@ -53,11 +53,18 @@ describe("convertLegadoSource", () => {
     );
   });
 
-  it("缺目录规则时报错：增量更新的最低要求", () => {
+  it("缺 chapterList 时报错：增量更新的最低要求", () => {
     expect(() => convertLegadoSource({ ...validSource, ruleToc: {} })).toThrow(/目录规则/);
-    expect(() =>
-      convertLegadoSource({ ...validSource, ruleToc: { chapterList: "class.x" } })
-    ).toThrow(/目录规则/);
+  });
+
+  it("只给 chapterList 时，章节名与地址按裸属性名兜底", () => {
+    // 真实书源里 chapterName/chapterUrl 常省略，实际就是取 text / href
+    const result = convertLegadoSource({
+      ...validSource,
+      ruleToc: { chapterList: "class.listmain@tag.dd" },
+    });
+    expect(result.config.tocName).toBe("text");
+    expect(result.config.tocUrl).toBe("href");
   });
 
   it("缺正文规则时报错", () => {
@@ -74,9 +81,34 @@ describe("convertLegadoSource", () => {
     expect(() =>
       convertLegadoSource({
         ...validSource,
-        ruleToc: { ...validSource.ruleToc, chapterList: "$.data.chapters" },
+        ruleToc: { ...validSource.ruleToc, chapterList: "{{java.ajax(url)}}" },
       })
     ).toThrow(/目录列表规则无法翻译/);
+  });
+
+  it("JSONPath 目录规则现在可用（JSON 接口源）", () => {
+    const result = convertLegadoSource({
+      ...validSource,
+      ruleToc: {
+        chapterList: "$.data.chapters[*]",
+        chapterName: "$.title",
+        chapterUrl: "$.url",
+      },
+      ruleContent: { content: "$.data.content" },
+    });
+    expect(result.config.tocList).toBe("$.data.chapters[*]");
+    expect(result.config.contentRule).toBe("$.data.content");
+  });
+
+  it("searchUrl 需要 JS 时只丢搜索能力，不拒整源", () => {
+    const result = convertLegadoSource({
+      ...validSource,
+      searchUrl: '{{url=source.getKey();java.ajax(url)}}?kw={{key}}',
+    });
+    expect(result.config.searchUrl).toBeNull();
+    expect(result.warnings.join()).toMatch(/搜索/);
+    // 目录与正文照常保留
+    expect(result.config.tocList).toBe("class.listmain@tag.dd");
   });
 
   it("可选规则不可翻译时降级为警告，不阻断导入", () => {

@@ -1,7 +1,14 @@
 import { guardedFetch } from "~/server/sources/fetch-guard";
 import { parseHtml } from "~/server/sources/html";
 import { buildSearchUrl, type RulesConfig } from "~/server/sources/legado";
-import { evalRuleAll, evalRuleNodes, evalRuleOne } from "~/server/sources/rule-expr";
+import {
+  evalRuleAll,
+  evalRuleNodes,
+  evalRuleOne,
+  htmlDoc,
+  jsonDoc,
+  type RuleDoc,
+} from "~/server/sources/rule-expr";
 import {
   resolveUrl,
   toParagraphs,
@@ -35,17 +42,35 @@ function readConfig(config: Record<string, unknown>): RulesConfig {
   };
 }
 
-async function loadHtml(
+/**
+ * 取回并解析成 RuleDoc。
+ *
+ * 按响应内容自动判断 HTML 还是 JSON：JSONPath 规则的源返回的是 JSON，
+ * 硬当 HTML 解析会得到一棵空树，规则全部落空且没有任何错误提示。
+ */
+async function loadDoc(
   ctx: Parameters<SourceAdapter["listBooks"]>[0],
   url: string
-): Promise<ReturnType<typeof parseHtml>> {
+): Promise<RuleDoc> {
   ctx.countRequest();
   const response = await guardedFetch(ctx.db, url, {
-    headers: { Accept: "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8" },
+    headers: { Accept: "text/html,application/json;q=0.9,*/*;q=0.8" },
   });
   if (!response.ok) throw new Error(response.message);
   if (response.result.status >= 400) throw new Error(`源返回 HTTP ${response.result.status}`);
-  return parseHtml(response.result.body);
+
+  const { body, contentType } = response.result;
+  const trimmed = body.trimStart();
+  const looksJson =
+    contentType.includes("json") || trimmed.startsWith("{") || trimmed.startsWith("[");
+  if (looksJson) {
+    try {
+      return jsonDoc(JSON.parse(body));
+    } catch {
+      // 声明是 JSON 但解析失败时退回 HTML，比直接报错更宽容
+    }
+  }
+  return htmlDoc(parseHtml(body));
 }
 
 /** 目录页可能与详情页不同，按 infoTocUrl 规则跳转一次 */
@@ -55,7 +80,7 @@ async function resolveTocUrl(
   bookUrl: string
 ): Promise<string> {
   if (!config.infoTocUrl) return bookUrl;
-  const doc = await loadHtml(ctx, bookUrl);
+  const doc = await loadDoc(ctx, bookUrl);
   const raw = evalRuleOne(doc, config.infoTocUrl);
   return raw ? resolveUrl(bookUrl, raw) : bookUrl;
 }
@@ -67,7 +92,7 @@ export const rulesAdapter: SourceAdapter = {
   async probe(ctx) {
     try {
       const config = readConfig(ctx.config);
-      const doc = await loadHtml(ctx, ctx.endpoint);
+      const doc = await loadDoc(ctx, ctx.endpoint);
       // 首页通常不是目录页，能连通并解析出 HTML 就算基本可用
       const titleGuess = evalRuleOne(doc, "tag.title@text");
       const tocProbe = evalRuleAll(doc, config.tocName).slice(0, 5);
@@ -89,7 +114,7 @@ export const rulesAdapter: SourceAdapter = {
       throw new Error("该源未配置搜索规则，请直接用详情页地址订阅");
     }
     const url = resolveUrl(ctx.endpoint, buildSearchUrl(config.searchUrl, keyword));
-    const doc = await loadHtml(ctx, url);
+    const doc = await loadDoc(ctx, url);
     const items = evalRuleNodes(doc, config.searchList);
     const books: SourceBook[] = [];
     for (const item of items) {
@@ -113,7 +138,7 @@ export const rulesAdapter: SourceAdapter = {
   async listChapters(ctx, book): Promise<SourceChapter[]> {
     const config = readConfig(ctx.config);
     const tocUrl = await resolveTocUrl(ctx, config, book.externalId);
-    const doc = await loadHtml(ctx, tocUrl);
+    const doc = await loadDoc(ctx, tocUrl);
     const items = evalRuleNodes(doc, config.tocList);
     const chapters: SourceChapter[] = [];
     const seen = new Set<string>();
@@ -135,7 +160,7 @@ export const rulesAdapter: SourceAdapter = {
 
   async fetchChapter(ctx, chapter) {
     const config = readConfig(ctx.config);
-    const doc = await loadHtml(ctx, chapter.externalKey);
+    const doc = await loadDoc(ctx, chapter.externalKey);
     const parsed = evalRuleOne(doc, config.contentRule);
     if (!parsed) throw new Error("正文规则未命中内容");
     // 正文规则多为 @html/@content，取出来的是 HTML 片段，需再解析分段；

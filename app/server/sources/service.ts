@@ -455,6 +455,75 @@ export async function removeSubscription(db: AppDb, subscriptionId: string, acto
   });
 }
 
+export type BulkAction = "enable" | "disable" | "delete";
+
+export interface BulkResult {
+  ok: string[];
+  failed: { sourceId: string; reason: string }[];
+}
+
+/**
+ * 批量启用/停用/删除源。
+ *
+ * 导入一份合集会一次进来几百个源，逐个点按钮不可行。
+ * 单个失败只记原因，不中断整批。
+ */
+export async function bulkUpdateSources(
+  db: AppDb,
+  sourceIds: string[],
+  action: BulkAction,
+  actorId: string
+): Promise<BulkResult> {
+  const ok: string[] = [];
+  const failed: { sourceId: string; reason: string }[] = [];
+
+  for (const sourceId of sourceIds) {
+    try {
+      if (action === "delete") {
+        await deleteSource(db, sourceId, actorId);
+      } else {
+        await updateSourceStatus(db, sourceId, action === "enable" ? "enabled" : "disabled", actorId);
+      }
+      ok.push(sourceId);
+    } catch (error) {
+      failed.push({
+        sourceId,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  await db.insert(auditLogs).values({
+    id: crypto.randomUUID(),
+    actorId,
+    action: `content_source.bulk_${action}`,
+    entityType: "content_source",
+    entityId: `${ok.length}/${sourceIds.length}`,
+    after: { action, ok: ok.length, failed: failed.length },
+    reason: "admin bulk source management",
+  });
+
+  return { ok, failed };
+}
+
+/** 按名称/地址/类型/状态筛选源，供大批量场景下的管理页使用 */
+export async function listSourcesFiltered(
+  db: AppDb,
+  filter?: { q?: string | null; kind?: string | null; status?: string | null }
+) {
+  const rows = await listSources(db);
+  const q = filter?.q?.trim().toLowerCase();
+  return rows.filter((row) => {
+    if (filter?.kind && row.kind !== filter.kind) return false;
+    if (filter?.status && row.status !== filter.status) return false;
+    if (q) {
+      const haystack = `${row.name} ${row.endpoint}`.toLowerCase();
+      if (!haystack.includes(q)) return false;
+    }
+    return true;
+  });
+}
+
 export async function listSyncRuns(db: AppDb, limit = 30) {
   return db
     .select({

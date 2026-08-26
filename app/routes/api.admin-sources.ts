@@ -13,7 +13,7 @@ import {
   importLegadoSources,
   listAdapters,
   listDomains,
-  listSources,
+
   listSubscriptions,
   listSyncRuns,
   probeSource,
@@ -25,6 +25,9 @@ import {
   updateSourceStatus,
 } from "~/server/sources/service";
 import { quickImportAndSubscribe } from "~/server/sources/quick-import";
+import { batchImportSources } from "~/server/sources/batch-import";
+import { aggregateSearch } from "~/server/sources/search";
+import { bulkUpdateSources, listSourcesFiltered } from "~/server/sources/service";
 import { createSubscription, syncSource, syncSubscriptionToc } from "~/server/sources/sync";
 
 /**
@@ -81,8 +84,13 @@ export async function loader({ request, context }: Route.LoaderArgs) {
     }
   }
 
+  // 大批量导入后源可能有几百个，支持按名称/类型/状态筛选
   return Response.json({
-    sources: await listSources(admin.db),
+    sources: await listSourcesFiltered(admin.db, {
+      q: url.searchParams.get("q"),
+      kind: url.searchParams.get("kind"),
+      status: url.searchParams.get("status"),
+    }),
     adapters: listAdapters(),
     overview: await getSourceOverview(admin.db),
   });
@@ -110,6 +118,52 @@ export async function action({ request, context }: Route.ActionArgs) {
         host: body.host ?? "",
         authorizationNote: body.authorizationNote ?? "",
         actorId,
+      });
+      return Response.json(result);
+    }
+
+    // 从清单地址或粘贴的 JSON 批量导入（书源/订阅源自动判别）
+    if (path.includes("/batch-import")) {
+      const body = (await request.json()) as {
+        url?: string;
+        text?: string;
+        syncIntervalMinutes?: number;
+      };
+      const result = await batchImportSources(admin.db, {
+        url: body.url ?? null,
+        text: body.text ?? null,
+        syncIntervalMinutes: body.syncIntervalMinutes,
+        actorId,
+      });
+      return Response.json(result);
+    }
+
+    // 批量启用/停用/删除
+    if (path.includes("/bulk")) {
+      const body = (await request.json()) as {
+        sourceIds?: string[];
+        action?: "enable" | "disable" | "delete";
+      };
+      if (!body.sourceIds?.length || !body.action) {
+        return Response.json({ error: "sourceIds / action required" }, { status: 400 });
+      }
+      const result = await bulkUpdateSources(admin.db, body.sourceIds, body.action, actorId);
+      return Response.json(result);
+    }
+
+    // 跨源聚合搜索
+    if (path.includes("/aggregate-search")) {
+      const body = (await request.json()) as {
+        keyword?: string;
+        sourceIds?: string[];
+        perSourceLimit?: number;
+      };
+      if (!body.keyword?.trim()) {
+        return Response.json({ error: "keyword required" }, { status: 400 });
+      }
+      const result = await aggregateSearch(admin.db, body.keyword, {
+        sourceIds: body.sourceIds ?? null,
+        perSourceLimit: body.perSourceLimit,
       });
       return Response.json(result);
     }

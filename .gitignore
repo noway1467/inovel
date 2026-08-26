@@ -24,3 +24,8 @@ wrangler.local.jsonc
 # local sample book (copyrighted, not for distribution)
 tests/*.txt
 
+_bs.json
+_rss.json
+
+# 本地工具产生的目录，与项目无关
+.freebuff
