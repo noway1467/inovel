@@ -28,6 +28,7 @@ import { quickImportAndSubscribe } from "~/server/sources/quick-import";
 import { batchImportSources } from "~/server/sources/batch-import";
 import { aggregateSearch } from "~/server/sources/search";
 import { bulkUpdateSources, listSourcesFiltered } from "~/server/sources/service";
+import { getVerifyOverview, purgeFailedSources, verifySources } from "~/server/sources/verify";
 import { createSubscription, syncSource, syncSubscriptionToc } from "~/server/sources/sync";
 
 /**
@@ -84,15 +85,17 @@ export async function loader({ request, context }: Route.LoaderArgs) {
     }
   }
 
-  // 大批量导入后源可能有几百个，支持按名称/类型/状态筛选
+  // 大批量导入后源可能有几百个，支持按名称/类型/状态/验证结果筛选
   return Response.json({
     sources: await listSourcesFiltered(admin.db, {
       q: url.searchParams.get("q"),
       kind: url.searchParams.get("kind"),
       status: url.searchParams.get("status"),
+      verifyStatus: url.searchParams.get("verifyStatus"),
     }),
     adapters: listAdapters(),
     overview: await getSourceOverview(admin.db),
+    verifyOverview: await getVerifyOverview(admin.db),
   });
 }
 
@@ -148,6 +151,29 @@ export async function action({ request, context }: Route.ActionArgs) {
         return Response.json({ error: "sourceIds / action required" }, { status: 400 });
       }
       const result = await bulkUpdateSources(admin.db, body.sourceIds, body.action, actorId);
+      return Response.json(result);
+    }
+
+    // 分批验证源可用性（实跑搜索 + 取目录）
+    if (path.includes("/verify-batch")) {
+      const body = (await request.json()) as {
+        keyword?: string;
+        limit?: number;
+        sourceIds?: string[];
+        recheck?: boolean;
+      };
+      const result = await verifySources(admin.db, {
+        keyword: body.keyword,
+        limit: body.limit,
+        sourceIds: body.sourceIds ?? null,
+        recheck: body.recheck,
+      });
+      return Response.json(result);
+    }
+
+    // 清掉验证失败的源，只留实测可用的
+    if (path.includes("/purge-failed")) {
+      const result = await purgeFailedSources(admin.db);
       return Response.json(result);
     }
 

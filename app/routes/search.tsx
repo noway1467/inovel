@@ -91,6 +91,11 @@ interface BatchResponse {
   error?: string;
 }
 
+/** 自动连查时，攒到这么多本就停，剩下的源留给用户按需展开 */
+const minAutoResults = 5;
+/** 自动连查的最大轮数，避免一次搜索把几百个源全打一遍 */
+const maxAutoRounds = 6;
+
 /**
  * 在线源结果，分批加载。
  *
@@ -115,7 +120,7 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
   }, [query]);
 
   const loadBatch = useCallback(
-    async (offset: number) => {
+    async (offset: number): Promise<{ found: number; next: number | null } | null> => {
       setLoading(true);
       setError("");
       try {
@@ -126,7 +131,7 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
         if (!response.ok) {
           setError(data.error ?? "在线源搜索失败");
           setNextOffset(null);
-          return;
+          return null;
         }
         // 同名同作者的书合并各源，不重复列
         setBooks((prev) => {
@@ -154,9 +159,11 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
         setQueried((prev) => prev + data.totals.sourcesQueried);
         setOkCount((prev) => prev + data.totals.sourcesOk);
         setNextOffset(data.totals.nextOffset);
+        return { found: data.books.length, next: data.totals.nextOffset };
       } catch {
         setError("网络异常，稍后重试");
         setNextOffset(null);
+        return null;
       } finally {
         setLoading(false);
       }
@@ -164,10 +171,39 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
     [query]
   );
 
-  // 首批自动查，后续由用户点「继续搜索」推进
+  /**
+   * 自动往下查，直到攒够结果或源查完。
+   *
+   * 原先只自动查第一批，没结果就要手动点「继续搜索」—— 而多数关键字
+   * 在前 8 个源里本来就搜不到，等于每次都得手点好几轮。
+   *
+   * 停止条件取「够用」而非「查完」：攒到 minAutoResults 本就停，
+   * 剩下的源留给用户按需展开，避免为一次搜索把 250 个源全打一遍。
+   */
   useEffect(() => {
     if (!query || sourceCount === 0) return;
-    void loadBatch(0);
+    let cancelled = false;
+
+    const run = async () => {
+      let offset = 0;
+      let collected = 0;
+      let rounds = 0;
+
+      while (!cancelled && rounds < maxAutoRounds) {
+        rounds += 1;
+        const result = await loadBatch(offset);
+        if (!result) return;
+        collected += result.found;
+        if (collected >= minAutoResults || result.next === null) return;
+        offset = result.next;
+      }
+    };
+
+    void run();
+    // 关键字变化或组件卸载时中止，避免上一次的轮询继续写状态
+    return () => {
+      cancelled = true;
+    };
   }, [query, sourceCount, loadBatch]);
 
   if (sourceCount === 0) {

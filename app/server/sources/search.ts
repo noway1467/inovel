@@ -101,8 +101,48 @@ async function runPooled<T, R>(
 
 /** 分组键：书名 + 作者，两者都规范化后比较 */
 function groupKey(title: string, author: string | null | undefined): string {
-  const normalize = (value: string) => value.replace(/\s+/g, "").toLowerCase();
-  return `${normalize(title)}|${normalize(author ?? "")}`;
+  return `${normalizeForMatch(title)}|${normalizeForMatch(author ?? "")}`;
+}
+
+/** 全角空格。写成转义，避免源码里出现不可见字符。 */
+const wideSpace = "\\u3000";
+
+/** 比较用的规范化：去空白、去全角标点、转小写 */
+function normalizeForMatch(value: string): string {
+  return value
+    .replace(new RegExp(`[\\s${wideSpace}]+`, "g"), "")
+    .replace(/[《》「」【】（）()、，,。.!！?？:：;；~～\-—_]/g, "")
+    .toLowerCase();
+}
+
+/**
+ * 结果是否真的匹配关键字。
+ *
+ * 书源搜索页很少做严格匹配：不少站对任意关键字都回吐热门榜或整个分类页，
+ * 于是搜「剑来」会混进几十本无关的书。这里按书名/作者做一次校验，
+ * 把明显不相关的结果剔掉。
+ *
+ * 判定标准（满足其一）：
+ *  - 书名或作者包含完整关键字
+ *  - 关键字被拆成的每个字/词都出现在书名里（应对「剑 来」这类带空格输入）
+ */
+export function matchesKeyword(book: { title: string; author?: string | null }, keyword: string): boolean {
+  const needle = normalizeForMatch(keyword);
+  if (!needle) return true;
+
+  const title = normalizeForMatch(book.title);
+  const author = normalizeForMatch(book.author ?? "");
+  if (title.includes(needle) || (author && author.includes(needle))) return true;
+
+  // 空格分词后逐词命中（书名里顺序可能与输入不同）
+  const words = keyword
+    .split(new RegExp(`[\\s${wideSpace}]+`))
+    .map(normalizeForMatch)
+    .filter((word) => word.length > 0);
+  if (words.length > 1 && words.every((word) => title.includes(word) || author.includes(word))) {
+    return true;
+  }
+  return false;
 }
 
 export interface AggregateSearchOptions {
@@ -219,7 +259,14 @@ export async function aggregateSearch(
         ),
         timeoutMs
       );
-      const capped = found.slice(0, perSourceLimit);
+      /**
+       * 先按关键字过滤，再截断。
+       *
+       * 很多站对任意关键字都回吐热门榜或整个分类页 —— 不过滤的话
+       * 搜一本书会混进几十本无关的，而且这些噪声会挤掉后面源的真实结果。
+       */
+      const relevant = found.filter((book) => matchesKeyword(book, trimmed));
+      const capped = relevant.slice(0, perSourceLimit);
       for (const book of capped) {
         hits.push({ ...book, sourceId: source.id, sourceName: source.name });
       }
@@ -228,6 +275,11 @@ export async function aggregateSearch(
         sourceName: source.name,
         status: "ok",
         hits: capped.length,
+        // 源返回了但全被过滤掉时说明它没做关键字匹配，记下来便于排查
+        message:
+          found.length > 0 && capped.length === 0
+            ? `返回 ${found.length} 条但均与关键字无关`
+            : undefined,
       });
     } catch (error) {
       const isTimeout = error instanceof Error && error.name === "SourceTimeout";

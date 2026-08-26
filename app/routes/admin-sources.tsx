@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router";
 import {
   CloudDownload,
@@ -6,6 +6,7 @@ import {
   Plus,
   RefreshCw,
   Search as SearchIcon,
+  ShieldCheck,
   Trash2,
 } from "lucide-react";
 import type { Route } from "./+types/admin-sources";
@@ -34,6 +35,8 @@ interface SourceRow {
   kind: string;
   endpoint: string;
   status: string;
+  verifyStatus: string;
+  verifyMessage: string | null;
   attribution: string | null;
   syncIntervalMinutes: number;
   lastSyncAt: string | null;
@@ -108,10 +111,11 @@ export default function AdminSourcesPage({ loaderData }: Route.ComponentProps) {
   const [subscriptions, setSubscriptions] = useState<SubscriptionRow[]>([]);
   const [runs, setRuns] = useState<RunRow[]>([]);
   const [restrictionEnabled, setRestrictionEnabled] = useState(false);
+  const [verifyOverview, setVerifyOverview] = useState<VerifyOverview | null>(null);
   const [quickResult, setQuickResult] = useState<QuickImportResult | null>(null);
   const [batchResult, setBatchResult] = useState<BatchImportResult | null>(null);
   const [selected, setSelected] = useState<string[]>([]);
-  const [filter, setFilter] = useState<SourceFilter>({ q: "", kind: "", status: "" });
+  const [filter, setFilter] = useState<SourceFilter>({ q: "", kind: "", status: "", verifyStatus: "" });
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -123,6 +127,7 @@ export default function AdminSourcesPage({ loaderData }: Route.ComponentProps) {
     if (filter.q.trim()) params.set("q", filter.q.trim());
     if (filter.kind) params.set("kind", filter.kind);
     if (filter.status) params.set("status", filter.status);
+    if (filter.verifyStatus) params.set("verifyStatus", filter.verifyStatus);
     const listUrl = `/api/admin/sources/list${params.toString() ? `?${params}` : ""}`;
 
     const [main, domainRes, subRes, runRes] = (await Promise.all([
@@ -131,13 +136,14 @@ export default function AdminSourcesPage({ loaderData }: Route.ComponentProps) {
       fetch("/api/admin/sources/subscriptions").then((r) => r.json()),
       fetch("/api/admin/sources/runs").then((r) => r.json()),
     ])) as [
-      { sources?: SourceRow[]; adapters?: AdapterInfo[] },
+      { sources?: SourceRow[]; adapters?: AdapterInfo[]; verifyOverview?: VerifyOverview },
       { domains?: DomainRow[]; restrictionEnabled?: boolean },
       { subscriptions?: SubscriptionRow[] },
       { runs?: RunRow[] },
     ];
     setSources(main.sources ?? []);
     setAdapters(main.adapters ?? []);
+    setVerifyOverview(main.verifyOverview ?? null);
     setDomains(domainRes.domains ?? []);
     setRestrictionEnabled(Boolean(domainRes.restrictionEnabled));
     setSubscriptions(subRes.subscriptions ?? []);
@@ -243,6 +249,7 @@ export default function AdminSourcesPage({ loaderData }: Route.ComponentProps) {
         </TabsContent>
 
         <TabsContent value="sources" className="space-y-4">
+          <VerifyPanel overview={verifyOverview} busy={busy} onDone={loadAll} />
           <UrlImportForm
             busy={busy}
             result={batchResult}
@@ -619,6 +626,164 @@ interface SourceFilter {
   q: string;
   kind: string;
   status: string;
+  verifyStatus: string;
+}
+
+interface VerifyOverview {
+  ok: number;
+  failed: number;
+  untested: number;
+}
+
+interface VerifyOutcome {
+  sourceId: string;
+  sourceName: string;
+  status: "ok" | "failed";
+  searchHits: number;
+  tocChapters: number;
+  message: string;
+}
+
+interface VerifyBatchResponse {
+  outcomes: VerifyOutcome[];
+  totals: { checked: number; ok: number; failed: number; remaining: number };
+  error?: string;
+}
+
+/**
+ * 源可用性验证。
+ *
+ * 一份合集里多数源规则早已失效，只测连通性分辨不出来 —— 必须实际跑一遍
+ * 「搜索 → 取目录」。跑完可一键清掉坏源，剩下的都是实测能搜能读的。
+ */
+function VerifyPanel({
+  overview,
+  busy,
+  onDone,
+}: {
+  overview: VerifyOverview | null;
+  busy: boolean;
+  onDone: () => Promise<void>;
+}) {
+  const [running, setRunning] = useState(false);
+  const [keyword, setKeyword] = useState("第一");
+  const [outcomes, setOutcomes] = useState<VerifyOutcome[]>([]);
+  const [progress, setProgress] = useState({ checked: 0, ok: 0, failed: 0, remaining: 0 });
+  const [error, setError] = useState("");
+  const stopRef = useRef(false);
+
+  /** 连续跑到没有未测源为止；每批只验几个，避开单请求资源上限 */
+  async function runAll() {
+    setRunning(true);
+    setError("");
+    setOutcomes([]);
+    setProgress({ checked: 0, ok: 0, failed: 0, remaining: 0 });
+    stopRef.current = false;
+
+    try {
+      for (let round = 0; round < 200; round += 1) {
+        if (stopRef.current) break;
+        const response = await fetch("/api/admin/sources/verify-batch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ keyword }),
+        });
+        const data = (await response.json()) as VerifyBatchResponse;
+        if (!response.ok) {
+          setError(data.error ?? "验证失败");
+          break;
+        }
+        setOutcomes((prev) => [...data.outcomes, ...prev].slice(0, 80));
+        setProgress((prev) => ({
+          checked: prev.checked + data.totals.checked,
+          ok: prev.ok + data.totals.ok,
+          failed: prev.failed + data.totals.failed,
+          remaining: data.totals.remaining,
+        }));
+        // 没有待验证的源了
+        if (data.totals.checked === 0 || data.totals.remaining === 0) break;
+      }
+      await onDone();
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  return (
+    <section className="rounded-lg border border-border bg-surface p-4">
+      <h2 className="flex items-center gap-2 text-base font-semibold">
+        <ShieldCheck className="size-4" />
+        筛选可用源
+      </h2>
+      <p className="mt-1 text-xs text-muted-foreground">
+        用一个常见关键字实际跑「搜索 → 取目录」，两步都成才算可用。
+        只测连通性分辨不出规则是否已失效，必须实跑。
+      </p>
+
+      {overview && (
+        <div className="mt-3 flex flex-wrap gap-2 text-sm">
+          <Badge variant="success">可用 {overview.ok}</Badge>
+          <Badge variant="danger">不可用 {overview.failed}</Badge>
+          <Badge variant="secondary">未测 {overview.untested}</Badge>
+        </div>
+      )}
+
+      <div className="mt-3 flex flex-wrap items-end gap-2">
+        <div className="w-40 space-y-1.5">
+          <Label htmlFor="vf-kw">验证关键字</Label>
+          <Input id="vf-kw" value={keyword} onChange={(e) => setKeyword(e.target.value)} />
+        </div>
+        <Button disabled={running || busy} onClick={() => void runAll()}>
+          {running && <Loader2 className="size-4 animate-spin" />}
+          {running ? "验证中…" : "开始验证"}
+        </Button>
+        {running && (
+          <Button variant="secondary" onClick={() => (stopRef.current = true)}>
+            停止
+          </Button>
+        )}
+        <Button
+          variant="ghost"
+          disabled={running || busy || !overview?.failed}
+          onClick={async () => {
+            const response = await fetch("/api/admin/sources/purge-failed", { method: "POST" });
+            const data = (await response.json()) as { deleted?: number; error?: string };
+            if (!response.ok) {
+              setError(data.error ?? "清理失败");
+              return;
+            }
+            setError("");
+            await onDone();
+          }}
+        >
+          <Trash2 className="size-4" />
+          删除不可用的（{overview?.failed ?? 0}）
+        </Button>
+      </div>
+
+      {error && <p className="mt-2 text-sm text-danger">{error}</p>}
+
+      {progress.checked > 0 && (
+        <p className="mt-2 text-xs text-muted-foreground">
+          本次已验 {progress.checked} 个：可用 {progress.ok}，不可用 {progress.failed}
+          {progress.remaining > 0 && ` · 剩余未测 ${progress.remaining}`}
+        </p>
+      )}
+
+      {outcomes.length > 0 && (
+        <ul className="mt-2 max-h-64 space-y-0.5 overflow-y-auto text-xs">
+          {outcomes.map((outcome, i) => (
+            <li
+              key={`${outcome.sourceId}-${i}`}
+              className={outcome.status === "ok" ? "text-foreground" : "text-muted-foreground"}
+            >
+              {outcome.status === "ok" ? "✓" : "✗"} {outcome.sourceName}：{outcome.message}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
 }
 
 interface BatchImportResult {
@@ -929,6 +1094,25 @@ function SourceFilterBar({
             <SelectItem value="enabled">已启用</SelectItem>
             <SelectItem value="disabled">已停用</SelectItem>
             <SelectItem value="blocked">被限定挡下</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+      <div className="w-40 space-y-1.5">
+        <Label htmlFor="flt-verify">可用性</Label>
+        <Select
+          value={filter.verifyStatus || "all"}
+          onValueChange={(value) =>
+            onChange({ ...filter, verifyStatus: value === "all" ? "" : value })
+          }
+        >
+          <SelectTrigger id="flt-verify">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">全部</SelectItem>
+            <SelectItem value="ok">实测可用</SelectItem>
+            <SelectItem value="failed">实测不可用</SelectItem>
+            <SelectItem value="untested">未验证</SelectItem>
           </SelectContent>
         </Select>
       </div>
@@ -1256,10 +1440,18 @@ function SourceList({
               {statusLabels[source.status] ?? source.status}
             </Badge>
             <Badge variant="secondary">{source.kind}</Badge>
+            {/* 实测结果比连通性更能说明这个源到底能不能用 */}
+            {source.verifyStatus === "ok" && <Badge variant="success">实测可用</Badge>}
+            {source.verifyStatus === "failed" && <Badge variant="danger">实测不可用</Badge>}
             <span className="text-xs text-muted-foreground">
               {source.subscriptionCount} 个订阅 · 每 {source.syncIntervalMinutes} 分钟
             </span>
           </div>
+          {source.verifyMessage && (
+            <p className="mt-1 truncate text-xs text-muted-foreground">
+              验证：{source.verifyMessage}
+            </p>
+          )}
           <p className="mt-1 truncate text-xs text-muted-foreground">{source.endpoint}</p>
           {source.lastSyncMessage && (
             <p className="mt-1 text-xs text-muted-foreground">上次同步：{source.lastSyncMessage}</p>

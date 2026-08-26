@@ -531,13 +531,19 @@ export async function bulkUpdateSources(
 /** 按名称/地址/类型/状态筛选源，供大批量场景下的管理页使用 */
 export async function listSourcesFiltered(
   db: AppDb,
-  filter?: { q?: string | null; kind?: string | null; status?: string | null }
+  filter?: {
+    q?: string | null;
+    kind?: string | null;
+    status?: string | null;
+    verifyStatus?: string | null;
+  }
 ) {
   const rows = await listSources(db);
   const q = filter?.q?.trim().toLowerCase();
   return rows.filter((row) => {
     if (filter?.kind && row.kind !== filter.kind) return false;
     if (filter?.status && row.status !== filter.status) return false;
+    if (filter?.verifyStatus && row.verifyStatus !== filter.verifyStatus) return false;
     if (q) {
       const haystack = `${row.name} ${row.endpoint}`.toLowerCase();
       if (!haystack.includes(q)) return false;

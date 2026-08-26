@@ -75,6 +75,15 @@ export const contentSources = sqliteTable(
     searchWeight: integer("search_weight").notNull().default(0),
     searchFailures: integer("search_failures").notNull().default(0),
     lastSearchAt: integer("last_search_at", { mode: "timestamp_ms" }),
+    /**
+     * 实测可用性。一份合集里多数源规则已失效，靠实际跑一遍搜索+目录
+     * 才能分辨；结果存下来供「只保留可用源」使用。
+     */
+    verifyStatus: text("verify_status").notNull().default("untested"),
+    verifyMessage: text("verify_message"),
+    verifiedAt: integer("verified_at", { mode: "timestamp_ms" }),
+    verifySearchHits: integer("verify_search_hits").notNull().default(0),
+    verifyTocChapters: integer("verify_toc_chapters").notNull().default(0),
     createdBy: text("created_by").references(() => users.id),
     createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().defaultNow(),
     updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().defaultNow(),
@@ -87,6 +96,7 @@ export const contentSources = sqliteTable(
       table.searchFailures,
       table.searchWeight
     ),
+    index("content_sources_verify_idx").on(table.verifyStatus),
   ]
 );
 

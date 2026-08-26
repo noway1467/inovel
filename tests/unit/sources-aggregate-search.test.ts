@@ -114,20 +114,21 @@ describe("aggregateSearch", () => {
   it("多源命中的书排在前面", async () => {
     await seedTwoSources();
     const kw = encodeURIComponent("剑");
+    // 标题必须含关键字，否则会被精确匹配过滤掉 —— 这条测的是排序，不是过滤
     responses.set(
       `https://a.example.org/search?q=${kw}`,
       searchHtml([
-        { title: "只有甲有", author: "某", href: "/b/2" },
-        { title: "两源都有", author: "某", href: "/b/1" },
+        { title: "剑只有甲有", author: "某", href: "/b/2" },
+        { title: "剑两源都有", author: "某", href: "/b/1" },
       ])
     );
     responses.set(
       `https://b.example.org/search?q=${kw}`,
-      searchHtml([{ title: "两源都有", author: "某", href: "/b/8" }])
+      searchHtml([{ title: "剑两源都有", author: "某", href: "/b/8" }])
     );
 
     const result = await aggregateSearch(db, "剑");
-    expect(result.books[0]?.title).toBe("两源都有");
+    expect(result.books[0]?.title).toBe("剑两源都有");
     expect(result.books[0]?.options).toHaveLength(2);
   });
 
@@ -191,8 +192,9 @@ describe("aggregateSearch", () => {
   it("每源结果数受 perSourceLimit 限制", async () => {
     await seedTwoSources();
     const kw = encodeURIComponent("剑");
+    // 标题带上关键字，否则会先被精确匹配过滤掉，测不到截断
     const many = Array.from({ length: 20 }, (_, i) => ({
-      title: `书${i}`,
+      title: `剑书${i}`,
       author: "某",
       href: `/b/${i}`,
     }));

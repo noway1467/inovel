@@ -17,7 +17,7 @@ import {
   type SourceChapter,
 } from "~/server/sources/types";
 import { blockTextOf } from "~/server/sources/xml";
-import { fallbackChaptersFromText } from "~/server/sources/toc-fallback";
+import { detectChapterList } from "~/server/sources/toc-detect";
 
 /**
  * 通用 CSS 规则引擎适配器，消费 legado.ts 转换出的 RulesConfig。
@@ -58,25 +58,21 @@ function nextPageUrl(
 }
 
 /**
- * 目录规则失效时，从页面正文切出章节。
+ * 目录规则失效时，用通用探测从页面结构认出章节列表。
  *
- * 优先用正文规则取内容（它通常指向真正的文章容器）；正文规则也不中时，
- * 退到整页块级文本 —— 那会带上导航等噪声，但比完全读不了好。
+ * 返回的是带真实地址的章节，正文仍可按正文规则回源抓 —— 这是它比
+ * 「切正文当章节」强的关键：那种做法产出的章节没有可访问地址。
  */
-async function fallbackFromPage(
+async function detectFromPage(
   ctx: Parameters<SourceAdapter["listChapters"]>[0],
-  config: RulesConfig,
   pageUrl: string
-): Promise<SourceChapter[] | null> {
+): Promise<SourceChapter[]> {
   const doc = await loadDoc(ctx, pageUrl);
-
-  const viaContentRule = evalRuleOne(doc, config.contentRule);
-  const raw = viaContentRule || (doc.kind === "html" ? blockTextOf(doc.node) : "");
-  if (!raw) return null;
-
-  const text = raw.includes("<") ? blockTextOf(parseHtml(raw)) : raw;
-  const result = fallbackChaptersFromText(text);
-  return result ? result.chapters : null;
+  if (doc.kind !== "html") return [];
+  return detectChapterList(doc.node, pageUrl).map((item) => ({
+    externalKey: item.url,
+    title: item.title,
+  }));
 }
 
 function readConfig(config: Record<string, unknown>): RulesConfig {
@@ -230,18 +226,18 @@ export const rulesAdapter: SourceAdapter = {
     if (chapters.length > 0) return chapters;
 
     /**
-     * 目录规则一无所获时兜底：把页面正文当长文本，用本地导入那套
-     * 章节识别引擎切章（认不出标题就按字数切）。
+     * 目录规则一无所获时，改用通用目录探测：直接从页面结构认出章节列表。
      *
-     * 书源规则常年失修，站点一改版 tocList 就失效。与其把整本书判死，
-     * 不如退一步给出可读的章节。
+     * 不再走"把页面正文按字数切章"那条路 —— 目录页上没有正文，切出来的
+     * 是简介碎片，会得到一堆点开就报错的假章节。探测真实目录才有意义：
+     * 找到的是带真实地址的章节，正文照常能回源抓。
      */
-    const fallback = await fallbackFromPage(ctx, config, firstUrl);
-    if (fallback) return fallback;
+    const detected = await detectFromPage(ctx, firstUrl);
+    if (detected.length > 0) return detected;
 
     throw new Error(
-      `目录规则未命中任何章节（已尝试 ${pages} 页），且页面正文不足以切分。` +
-        `检查 tocList / tocName / tocUrl 是否匹配该站结构。`
+      `目录规则未命中任何章节（已尝试 ${pages} 页），页面里也没探测到章节列表。` +
+        `该源规则可能已失效。`
     );
   },
 
