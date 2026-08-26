@@ -3,6 +3,7 @@ import {
   auditLogs,
   books,
   contentSources,
+  siteSettings,
   sourceChapterLinks,
   sourceDomains,
   sourceStatus,
@@ -11,7 +12,14 @@ import {
   subscriptionStatus,
 } from "drizzle/schema";
 import type { AppDb } from "~/server/db";
-import { hostMatchesAllowlist, loadAllowlist, parseSourceUrl } from "~/server/sources/fetch-guard";
+import {
+  domainRestrictionKey,
+  hostMatchesAllowlist,
+  isDomainRestrictionEnabled,
+  loadAllowlist,
+  normalizeEndpoint,
+  parseSourceUrl,
+} from "~/server/sources/fetch-guard";
 import { parseLegadoJson, type ConversionResult } from "~/server/sources/legado";
 import { getAdapter, listAdapters } from "~/server/sources/registry";
 import type { SourceBook } from "~/server/sources/types";
@@ -26,23 +34,24 @@ export async function listDomains(db: AppDb) {
 
 export async function addDomain(
   db: AppDb,
-  input: { host: string; authorizationNote: string; actorId: string }
+  input: { host: string; authorizationNote?: string; actorId: string }
 ) {
   const host = input.host.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, "");
   if (!host || !/^[a-z0-9.-]+\.[a-z]{2,}$/.test(host)) {
     throw new Error(`域名格式无效：${input.host}`);
   }
-  const note = input.authorizationNote.trim();
-  // 强制填写授权依据：这条记录是事后追责的唯一凭据
-  if (note.length < 5) {
-    throw new Error("必须填写授权依据（至少 5 个字），说明你为何有权抓取该站点");
-  }
+  // 备注是可选的自用标签，不做长度校验
+  const note = (input.authorizationNote ?? "").trim() || "（无备注）";
 
   const id = crypto.randomUUID();
   await db
     .insert(sourceDomains)
     .values({ id, host, authorizationNote: note.slice(0, 500), confirmedBy: input.actorId })
     .onConflictDoNothing();
+
+  // 必须回头放行此前被挡下的源：否则源卡在 blocked，而 UI 上的「启用」
+  // 按钮在 blocked 状态恰好是禁用的，用户没有任何办法救它
+  const unblocked = await reconcileBlockedSources(db);
 
   await db.insert(auditLogs).values({
     id: crypto.randomUUID(),
@@ -51,25 +60,33 @@ export async function addDomain(
     entityType: "source_domain",
     entityId: host,
     after: { host, authorizationNote: note.slice(0, 500) },
-    reason: "operator confirmed crawl authorization",
+    reason: "operator added domain to allowlist",
   });
-  return { host };
+  return { host, unblocked };
 }
 
 export async function removeDomain(db: AppDb, host: string, actorId: string) {
   await db.delete(sourceDomains).where(eq(sourceDomains.host, host));
-  // 白名单撤销后，该域名下的源立即停抓
-  const affected = await db.select().from(contentSources).all();
-  for (const source of affected) {
-    const parsed = parseSourceUrl(source.endpoint);
-    if (!parsed.ok) continue;
-    if (parsed.url.hostname.toLowerCase() === host || parsed.url.hostname.toLowerCase().endsWith(`.${host}`)) {
-      await db
-        .update(contentSources)
-        .set({ status: sourceStatus.blocked, updatedAt: new Date() })
-        .where(eq(contentSources.id, source.id));
+
+  // 只在域名限定开启时才需要停抓：开关关着的话白名单本身不生效，
+  // 删一条记录不该影响任何源
+  let blockedCount = 0;
+  if (await isDomainRestrictionEnabled(db)) {
+    const affected = await db.select().from(contentSources).all();
+    for (const source of affected) {
+      const parsed = parseSourceUrl(source.endpoint);
+      if (!parsed.ok) continue;
+      const hostname = parsed.url.hostname.toLowerCase();
+      if (hostname === host || hostname.endsWith(`.${host}`)) {
+        await db
+          .update(contentSources)
+          .set({ status: sourceStatus.blocked, updatedAt: new Date() })
+          .where(eq(contentSources.id, source.id));
+        blockedCount += 1;
+      }
     }
   }
+
   await db.insert(auditLogs).values({
     id: crypto.randomUUID(),
     actorId,
@@ -77,22 +94,95 @@ export async function removeDomain(db: AppDb, host: string, actorId: string) {
     entityType: "source_domain",
     entityId: host,
     before: { host },
-    reason: "operator revoked crawl authorization",
+    reason: "operator removed domain from allowlist",
   });
+  return { blocked: blockedCount };
 }
 
-/** 源的状态取决于其域名是否已授权；登记与启用解耦，避免误抓。 */
+/**
+ * 源登记后默认直接可用。
+ *
+ * 只有两种情况不启用：地址本身非法（解析不了、内网地址），
+ * 或者运营方主动开了域名限定而该域名不在白名单里。
+ */
 async function resolveStatus(db: AppDb, endpoint: string): Promise<{ status: string; reason: string }> {
   const parsed = parseSourceUrl(endpoint);
   if (!parsed.ok) return { status: sourceStatus.blocked, reason: parsed.message };
-  const allowlist = await loadAllowlist(db);
-  if (!hostMatchesAllowlist(parsed.url.hostname, allowlist)) {
-    return {
-      status: sourceStatus.blocked,
-      reason: `域名 ${parsed.url.hostname} 未获授权确认，源已登记但不会抓取`,
-    };
+  if (await isDomainRestrictionEnabled(db)) {
+    const allowlist = await loadAllowlist(db);
+    if (!hostMatchesAllowlist(parsed.url.hostname, allowlist)) {
+      return {
+        status: sourceStatus.blocked,
+        reason: `已开启域名限定，${parsed.url.hostname} 不在白名单内`,
+      };
+    }
   }
-  return { status: sourceStatus.enabled, reason: "域名已授权，源已启用" };
+  return { status: sourceStatus.enabled, reason: "源已启用" };
+}
+
+/**
+ * 重新评估所有 blocked 源，把现在已可用的放行。
+ *
+ * 之前 removeDomain 会把源降级为 blocked，但 addDomain 不会升回来，
+ * 而 UI 上「启用」按钮在 blocked 时恰好是禁用的 —— 源就永久卡死。
+ * 任何改变放行条件的操作都必须调这个函数。
+ */
+export async function reconcileBlockedSources(db: AppDb): Promise<number> {
+  const blocked = await db
+    .select()
+    .from(contentSources)
+    .where(eq(contentSources.status, sourceStatus.blocked))
+    .all();
+  let unblocked = 0;
+  for (const source of blocked) {
+    const { status } = await resolveStatus(db, source.endpoint);
+    if (status === sourceStatus.enabled) {
+      await db
+        .update(contentSources)
+        .set({ status: sourceStatus.enabled, updatedAt: new Date() })
+        .where(eq(contentSources.id, source.id));
+      unblocked += 1;
+    }
+  }
+  return unblocked;
+}
+
+/** 读写「域名限定」开关。关闭时（默认）所有合法地址都可抓。 */
+export async function getDomainRestriction(db: AppDb): Promise<boolean> {
+  return isDomainRestrictionEnabled(db);
+}
+
+export async function setDomainRestriction(db: AppDb, enabled: boolean, actorId: string) {
+  const existing = await db
+    .select({ id: siteSettings.id })
+    .from(siteSettings)
+    .where(eq(siteSettings.key, domainRestrictionKey))
+    .get();
+  if (existing) {
+    await db
+      .update(siteSettings)
+      .set({ value: { enabled }, updatedAt: new Date() })
+      .where(eq(siteSettings.id, existing.id));
+  } else {
+    await db.insert(siteSettings).values({
+      id: crypto.randomUUID(),
+      key: domainRestrictionKey,
+      value: { enabled },
+      description: "是否用白名单限定在线源可抓域名，默认关闭",
+    });
+  }
+  // 关掉限定后，此前被挡下的源应立即恢复
+  const unblocked = enabled ? 0 : await reconcileBlockedSources(db);
+  await db.insert(auditLogs).values({
+    id: crypto.randomUUID(),
+    actorId,
+    action: "source_domain.restriction",
+    entityType: "site_settings",
+    entityId: domainRestrictionKey,
+    after: { enabled },
+    reason: "admin toggled source domain restriction",
+  });
+  return { enabled, unblocked };
 }
 
 export async function listSources(db: AppDb) {
@@ -121,8 +211,12 @@ export interface CreateSourceInput {
 
 export async function createSource(db: AppDb, input: CreateSourceInput) {
   getAdapter(input.kind); // 未知类型直接抛错
-  const parsed = parseSourceUrl(input.endpoint);
-  if (!parsed.ok) throw new Error(parsed.message);
+  // 与查重共用同一个归一化实现，避免"存的值"和"查的值"分叉
+  const endpoint = normalizeEndpoint(input.endpoint);
+  if (!endpoint) {
+    const parsed = parseSourceUrl(input.endpoint);
+    throw new Error(parsed.ok ? `地址无法解析：${input.endpoint}` : parsed.message);
+  }
   if (!input.name.trim()) throw new Error("源名称不能为空");
 
   const interval = input.syncIntervalMinutes ?? 360;
@@ -130,13 +224,13 @@ export async function createSource(db: AppDb, input: CreateSourceInput) {
     throw new Error("同步间隔需在 30 分钟至 7 天之间");
   }
 
-  const { status, reason } = await resolveStatus(db, input.endpoint);
+  const { status, reason } = await resolveStatus(db, endpoint);
   const id = crypto.randomUUID();
   await db.insert(contentSources).values({
     id,
     name: input.name.trim().slice(0, 100),
     kind: input.kind,
-    endpoint: parsed.url.toString(),
+    endpoint,
     status,
     config: input.config ?? null,
     attribution: input.attribution?.slice(0, 200) ?? null,
@@ -150,14 +244,14 @@ export async function createSource(db: AppDb, input: CreateSourceInput) {
     action: "content_source.create",
     entityType: "content_source",
     entityId: id,
-    after: { name: input.name, kind: input.kind, endpoint: parsed.url.toString(), status },
+    after: { name: input.name, kind: input.kind, endpoint, status },
     reason: "admin added online source",
   });
 
   return { id, status, reason };
 }
 
-/** 批量导入开源阅读书源 JSON。域名未授权的会登记为 blocked，不会抓取。 */
+/** 批量导入书源 JSON。导入后即启用，除非开了域名限定且不在白名单内。 */
 export async function importLegadoSources(
   db: AppDb,
   text: string,

@@ -8,6 +8,7 @@ import {
   browseSource,
   createSource,
   deleteSource,
+  getDomainRestriction,
   getSourceOverview,
   importLegadoSources,
   listAdapters,
@@ -19,9 +20,11 @@ import {
   removeDomain,
   removeSubscription,
   searchSource,
+  setDomainRestriction,
   setSubscriptionStatus,
   updateSourceStatus,
 } from "~/server/sources/service";
+import { quickImportAndSubscribe } from "~/server/sources/quick-import";
 import { createSubscription, syncSource, syncSubscriptionToc } from "~/server/sources/sync";
 
 /**
@@ -50,7 +53,10 @@ export async function loader({ request, context }: Route.LoaderArgs) {
   const path = url.pathname;
 
   if (path.includes("/domains")) {
-    return Response.json({ domains: await listDomains(admin.db) });
+    return Response.json({
+      domains: await listDomains(admin.db),
+      restrictionEnabled: await getDomainRestriction(admin.db),
+    });
   }
   if (path.includes("/subscriptions")) {
     const sourceId = url.searchParams.get("sourceId") ?? undefined;
@@ -105,6 +111,38 @@ export async function action({ request, context }: Route.ActionArgs) {
         authorizationNote: body.authorizationNote ?? "",
         actorId,
       });
+      return Response.json(result);
+    }
+
+    // 一步到位：书源 JSON（或已有 sourceId）→ 已订阅并开始同步
+    if (path.includes("/quick-import")) {
+      const body = (await request.json()) as {
+        sourceJson?: string;
+        sourceId?: string;
+        bookUrls?: string[];
+        keywords?: string[];
+        maxPerKeyword?: number;
+        subscribeAllFromCatalog?: boolean;
+        maxFromCatalog?: number;
+        syncIntervalMinutes?: number;
+      };
+      const result = await quickImportAndSubscribe(admin.db, env.QUEUE_JOBS, {
+        sourceJson: body.sourceJson ?? null,
+        sourceId: body.sourceId ?? null,
+        bookUrls: body.bookUrls ?? null,
+        keywords: body.keywords ?? null,
+        maxPerKeyword: body.maxPerKeyword,
+        subscribeAllFromCatalog: body.subscribeAllFromCatalog,
+        maxFromCatalog: body.maxFromCatalog,
+        syncIntervalMinutes: body.syncIntervalMinutes,
+        actorId,
+      });
+      return Response.json(result);
+    }
+
+    if (path.includes("/domain-restriction")) {
+      const body = (await request.json()) as { enabled?: boolean };
+      const result = await setDomainRestriction(admin.db, Boolean(body.enabled), actorId);
       return Response.json(result);
     }
 

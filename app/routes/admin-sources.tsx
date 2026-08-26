@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router";
-import { CloudDownload, Loader2, Plus, RefreshCw, ShieldCheck, Trash2 } from "lucide-react";
+import { CloudDownload, Loader2, Plus, RefreshCw, Trash2 } from "lucide-react";
 import type { Route } from "./+types/admin-sources";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
@@ -90,7 +90,7 @@ export async function loader({ request, context }: Route.LoaderArgs) {
 const statusLabels: Record<string, string> = {
   enabled: "已启用",
   disabled: "已停用",
-  blocked: "域名未授权",
+  blocked: "被域名限定挡下",
 };
 
 export default function AdminSourcesPage({ loaderData }: Route.ComponentProps) {
@@ -100,6 +100,8 @@ export default function AdminSourcesPage({ loaderData }: Route.ComponentProps) {
   const [domains, setDomains] = useState<DomainRow[]>([]);
   const [subscriptions, setSubscriptions] = useState<SubscriptionRow[]>([]);
   const [runs, setRuns] = useState<RunRow[]>([]);
+  const [restrictionEnabled, setRestrictionEnabled] = useState(false);
+  const [quickResult, setQuickResult] = useState<QuickImportResult | null>(null);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -114,13 +116,14 @@ export default function AdminSourcesPage({ loaderData }: Route.ComponentProps) {
       fetch("/api/admin/sources/runs").then((r) => r.json()),
     ])) as [
       { sources?: SourceRow[]; adapters?: AdapterInfo[] },
-      { domains?: DomainRow[] },
+      { domains?: DomainRow[]; restrictionEnabled?: boolean },
       { subscriptions?: SubscriptionRow[] },
       { runs?: RunRow[] },
     ];
     setSources(main.sources ?? []);
     setAdapters(main.adapters ?? []);
     setDomains(domainRes.domains ?? []);
+    setRestrictionEnabled(Boolean(domainRes.restrictionEnabled));
     setSubscriptions(subRes.subscriptions ?? []);
     setRuns(runRes.runs ?? []);
   }, [isAdmin]);
@@ -177,16 +180,10 @@ export default function AdminSourcesPage({ loaderData }: Route.ComponentProps) {
         </p>
       </header>
 
-      <div className="rounded-lg border border-warning/40 bg-warning/5 p-4 text-sm">
-        <p className="flex items-center gap-2 font-medium">
-          <ShieldCheck className="size-4" />
-          抓取前请确认授权
-        </p>
-        <p className="mt-1.5 text-muted-foreground">
-          未在白名单内的域名一律拒绝访问，登记时需填写授权依据并记入审计日志。
-          源同步来的章节默认落草稿，需你逐本确认后再发布。
-        </p>
-      </div>
+      <p className="rounded-lg border border-border bg-surface/60 p-3 text-xs text-muted-foreground">
+        源导入后立即可用。同步来的章节先落草稿，你确认后再发布。
+        出站请求有体积（2MB）、超时（15s）与频率（1s 间隔）上限，内网与回环地址一律拒绝。
+      </p>
 
       {message && (
         <p role="status" className="rounded-md bg-secondary px-3 py-2 text-sm">
@@ -197,10 +194,27 @@ export default function AdminSourcesPage({ loaderData }: Route.ComponentProps) {
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList>
           <TabsTrigger value="sources">源（{sources.length}）</TabsTrigger>
-          <TabsTrigger value="domains">域名授权（{domains.length}）</TabsTrigger>
+          <TabsTrigger value="quick">导入并订阅</TabsTrigger>
           <TabsTrigger value="subscriptions">订阅（{subscriptions.length}）</TabsTrigger>
           <TabsTrigger value="runs">同步记录</TabsTrigger>
+          <TabsTrigger value="domains">域名限定</TabsTrigger>
         </TabsList>
+
+        <TabsContent value="quick" className="space-y-4">
+          <QuickImportForm
+            sources={sources}
+            busy={busy}
+            result={quickResult}
+            onSubmit={async (body) => {
+              const data = (await call(
+                "/api/admin/sources/quick-import",
+                { method: "POST", body: JSON.stringify(body) },
+                "导入订阅完成"
+              )) as QuickImportResult | null;
+              setQuickResult(data);
+            }}
+          />
+        </TabsContent>
 
         <TabsContent value="sources" className="space-y-4">
           <SourceCreateForm adapters={adapters} busy={busy} onSubmit={(body) =>
@@ -231,11 +245,43 @@ export default function AdminSourcesPage({ loaderData }: Route.ComponentProps) {
         </TabsContent>
 
         <TabsContent value="domains" className="space-y-4">
+          <section className="rounded-lg border border-border bg-surface p-4">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h2 className="text-base font-semibold">域名限定</h2>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  可选功能，默认关闭。关闭时任何合法地址都能抓；打开后只允许下面列出的域名，
+                  用于把抓取范围收窄到指定站点。
+                </p>
+              </div>
+              <Button
+                variant={restrictionEnabled ? "default" : "secondary"}
+                size="sm"
+                disabled={busy}
+                onClick={() =>
+                  void call(
+                    "/api/admin/sources/domain-restriction",
+                    { method: "POST", body: JSON.stringify({ enabled: !restrictionEnabled }) },
+                    restrictionEnabled ? "已关闭域名限定，被挡下的源已恢复" : "已开启域名限定"
+                  )
+                }
+              >
+                {restrictionEnabled ? "已开启" : "已关闭"}
+              </Button>
+            </div>
+          </section>
           <DomainForm busy={busy} onSubmit={(body) =>
-            call("/api/admin/sources/domains", { method: "POST", body: JSON.stringify(body) }, "域名已授权")
+            call("/api/admin/sources/domains", { method: "POST", body: JSON.stringify(body) }, "域名已添加")
           } />
           {domains.length === 0 ? (
-            <EmptyState title="白名单为空" description="没有任何域名获授权，所有抓取都会被拒绝。" />
+            <EmptyState
+              title="列表为空"
+              description={
+                restrictionEnabled
+                  ? "已开启域名限定但列表为空，所有抓取都会被拒绝。"
+                  : "域名限定已关闭，这个列表当前不生效。"
+              }
+            />
           ) : (
             <ul className="space-y-2">
               {domains.map((domain) => (
@@ -501,9 +547,9 @@ function DomainForm({
 
   return (
     <section className="rounded-lg border border-border bg-surface p-4">
-      <h2 className="text-base font-semibold">授权新域名</h2>
+      <h2 className="text-base font-semibold">添加域名</h2>
       <p className="mt-1 text-xs text-muted-foreground">
-        只登记你确实有权抓取的站点：自建服务、已获授权的源、公共领域库。授权依据会记入审计日志。
+        命中时其子域一并放行。备注可留空，只是给你自己看的标签。
       </p>
       <div className="mt-3 grid gap-3 sm:grid-cols-2">
         <div className="space-y-1.5">
@@ -516,23 +562,211 @@ function DomainForm({
           />
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="dom-note">授权依据</Label>
+          <Label htmlFor="dom-note">备注（可选）</Label>
           <Input
             id="dom-note"
             value={note}
             onChange={(e) => setNote(e.target.value)}
-            placeholder="我自建的 Calibre-Web 实例"
+            placeholder="自建 Calibre-Web"
           />
         </div>
       </div>
       <Button
         className="mt-3"
-        disabled={busy || !host.trim() || note.trim().length < 5}
+        disabled={busy || !host.trim()}
         onClick={() => void onSubmit({ host, authorizationNote: note })}
       >
         {busy && <Loader2 className="size-4 animate-spin" />}
-        确认授权
+        添加
       </Button>
+    </section>
+  );
+}
+
+interface QuickImportResult {
+  sources: {
+    sourceId: string;
+    sourceName: string;
+    status: string;
+    warnings: string[];
+    subscribed: {
+      subscriptionId: string;
+      title: string;
+      chaptersAdded: number;
+      syncStatus: string;
+      syncMessage: string;
+    }[];
+    failed: { target: string; reason: string }[];
+  }[];
+  rejected: { name: string; reason: string }[];
+  totals: { sources: number; subscriptions: number; chaptersAdded: number };
+}
+
+/** 一步完成：书源 JSON（或已有源）+ 书籍地址/关键字 → 已订阅并开始同步 */
+function QuickImportForm({
+  sources,
+  busy,
+  result,
+  onSubmit,
+}: {
+  sources: SourceRow[];
+  busy: boolean;
+  result: QuickImportResult | null;
+  onSubmit: (body: Record<string, unknown>) => Promise<void>;
+}) {
+  const [mode, setMode] = useState<"json" | "existing">("json");
+  const [sourceJson, setSourceJson] = useState("");
+  const [sourceId, setSourceId] = useState("");
+  const [bookUrls, setBookUrls] = useState("");
+  const [keywords, setKeywords] = useState("");
+  const [maxPerKeyword, setMaxPerKeyword] = useState("1");
+
+  const canSubmit = mode === "json" ? sourceJson.trim().length > 0 : sourceId.length > 0;
+
+  return (
+    <section className="rounded-lg border border-border bg-surface p-4">
+      <h2 className="flex items-center gap-2 text-base font-semibold">
+        <CloudDownload className="size-4" />
+        导入并订阅
+      </h2>
+      <p className="mt-1 text-xs text-muted-foreground">
+        一次调用完成：登记源 → 解析书籍 → 建立订阅 → 拉目录 → 正文入队。
+        书籍地址与关键字可以都填，也可都留空（有目录的源会自动取目录前几本）。
+      </p>
+
+      <div className="mt-3 flex gap-2">
+        <Button size="sm" variant={mode === "json" ? "default" : "secondary"} onClick={() => setMode("json")}>
+          粘贴书源 JSON
+        </Button>
+        <Button
+          size="sm"
+          variant={mode === "existing" ? "default" : "secondary"}
+          onClick={() => setMode("existing")}
+        >
+          用已有源
+        </Button>
+      </div>
+
+      {mode === "json" ? (
+        <div className="mt-3 space-y-1.5">
+          <Label htmlFor="qi-json">书源 JSON</Label>
+          <Textarea
+            id="qi-json"
+            className="font-mono text-xs"
+            rows={6}
+            value={sourceJson}
+            onChange={(e) => setSourceJson(e.target.value)}
+            placeholder='[{"bookSourceName":"...","bookSourceUrl":"https://...","ruleToc":{...},"ruleContent":{...}}]'
+          />
+        </div>
+      ) : (
+        <div className="mt-3 space-y-1.5">
+          <Label htmlFor="qi-source">选择源</Label>
+          <Select value={sourceId} onValueChange={setSourceId}>
+            <SelectTrigger id="qi-source">
+              <SelectValue placeholder="选择一个已登记的源" />
+            </SelectTrigger>
+            <SelectContent>
+              {sources.map((source) => (
+                <SelectItem key={source.id} value={source.id}>
+                  {source.name}（{source.kind}）
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      )}
+
+      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+        <div className="space-y-1.5">
+          <Label htmlFor="qi-urls">书籍详情页地址（每行一个）</Label>
+          <Textarea
+            id="qi-urls"
+            className="font-mono text-xs"
+            rows={3}
+            value={bookUrls}
+            onChange={(e) => setBookUrls(e.target.value)}
+            placeholder={"https://example.com/book/123\nhttps://example.com/book/456"}
+          />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="qi-keywords">搜索关键字（每行一个）</Label>
+          <Textarea
+            id="qi-keywords"
+            rows={3}
+            value={keywords}
+            onChange={(e) => setKeywords(e.target.value)}
+            placeholder={"修仙\n星海"}
+          />
+        </div>
+      </div>
+
+      <div className="mt-3 w-40 space-y-1.5">
+        <Label htmlFor="qi-max">每个关键字取几本</Label>
+        <Input
+          id="qi-max"
+          type="number"
+          min={1}
+          max={20}
+          value={maxPerKeyword}
+          onChange={(e) => setMaxPerKeyword(e.target.value)}
+        />
+      </div>
+
+      <Button
+        className="mt-3"
+        disabled={busy || !canSubmit}
+        onClick={() =>
+          void onSubmit({
+            ...(mode === "json" ? { sourceJson } : { sourceId }),
+            bookUrls: bookUrls.split("\n").map((s) => s.trim()).filter(Boolean),
+            keywords: keywords.split("\n").map((s) => s.trim()).filter(Boolean),
+            maxPerKeyword: Number(maxPerKeyword) || 1,
+          })
+        }
+      >
+        {busy && <Loader2 className="size-4 animate-spin" />}
+        导入并订阅
+      </Button>
+
+      {result && (
+        <div className="mt-4 space-y-2 border-t border-border pt-3 text-sm">
+          <p className="font-medium">
+            {result.totals.sources} 个源 · {result.totals.subscriptions} 个订阅 ·{" "}
+            {result.totals.chaptersAdded} 章新增
+          </p>
+          {result.sources.map((source) => (
+            <div key={source.sourceId} className="rounded-md border border-border/60 p-2.5">
+              <p className="flex items-center gap-2 text-sm font-medium">
+                {source.sourceName}
+                <Badge variant={source.status === "enabled" ? "success" : "warning"}>
+                  {statusLabels[source.status] ?? source.status}
+                </Badge>
+              </p>
+              {source.warnings.length > 0 && (
+                <p className="mt-1 text-xs text-muted-foreground">
+                  降级提示：{source.warnings.join("；")}
+                </p>
+              )}
+              {source.subscribed.map((sub) => (
+                <p key={sub.subscriptionId} className="mt-1 text-xs">
+                  ✓ {sub.title} — 新增 {sub.chaptersAdded} 章（{sub.syncMessage}）
+                </p>
+              ))}
+              {source.failed.map((fail, i) => (
+                <p key={`${fail.target}-${i}`} className="mt-1 text-xs text-danger">
+                  ✗ {fail.target}：{fail.reason}
+                </p>
+              ))}
+            </div>
+          ))}
+          {result.rejected.map((item, i) => (
+            <p key={`${item.name}-${i}`} className="text-xs text-danger">
+              ✗ {item.name}：{item.reason}
+            </p>
+          ))}
+        </div>
+      )}
     </section>
   );
 }
@@ -636,10 +870,11 @@ function SourceList({
             >
               浏览并订阅
             </Button>
+            {/* blocked 时也必须可点：否则源被挡下后没有任何自救途径 */}
             <Button
               size="sm"
               variant="ghost"
-              disabled={busy || source.status === "blocked"}
+              disabled={busy}
               onClick={() => void onToggle(source.id, source.status === "enabled" ? "disabled" : "enabled")}
             >
               {source.status === "enabled" ? "停用" : "启用"}

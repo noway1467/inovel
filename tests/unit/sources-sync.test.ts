@@ -7,7 +7,12 @@ import { createDb, type AppDb } from "~/server/db";
 import { createSqliteD1 } from "../helpers/sqlite-d1";
 import { createMemoryBucket, createSourceFixtures, makeRss } from "../helpers/sources-fixtures";
 import { createSubscription, fetchPendingChapters, findDueSources, syncSubscriptionToc } from "~/server/sources/sync";
-import { addDomain } from "~/server/sources/service";
+import {
+  addDomain,
+  createSource,
+  setDomainRestriction,
+  updateSourceStatus,
+} from "~/server/sources/service";
 
 /**
  * 端到端跑一遍订阅链路：域名授权 → 建源 → 订阅 → 拉目录 → 抓正文。
@@ -85,35 +90,66 @@ async function subscribe() {
   return result.subscriptionId;
 }
 
-describe("域名白名单", () => {
-  it("未授权的域名拒绝抓取，且不产生任何出站请求", async () => {
+describe("域名限定（默认关闭）", () => {
+  it("默认不限定域名：任何合法地址都能抓，无需预先登记", async () => {
+    responses.set(
+      "https://anything.example.org/rss",
+      makeRss([{ title: "第1章", link: "https://anything.example.org/c/1" }])
+    );
     await db.insert(contentSources).values({
-      id: "src-blocked",
-      name: "未授权源",
+      id: "src-open",
+      name: "未登记域名的源",
       kind: "feed",
-      endpoint: "https://evil.example.org/rss",
+      endpoint: "https://anything.example.org/rss",
       status: "enabled",
       createdBy: userId,
     });
     const sub = await createSubscription(db, {
-      sourceId: "src-blocked",
-      externalId: "https://evil.example.org/rss",
-      title: "未授权",
+      sourceId: "src-open",
+      externalId: "https://anything.example.org/rss",
+      title: "未登记",
       actorId: userId,
     });
     const outcome = await syncSubscriptionToc(db, undefined, sub.subscriptionId, "manual");
+    expect(outcome.status).toBe("ok");
+    expect(outcome.chaptersAdded).toBe(1);
+  });
+
+  it("新建源默认直接启用，不停在 blocked", async () => {
+    const created = await createSource(db, {
+      name: "随手加的源",
+      kind: "feed",
+      endpoint: "https://fresh.example.org/rss",
+      actorId: userId,
+    });
+    expect(created.status).toBe("enabled");
+  });
+
+  it("开启限定后，白名单外的域名被拒且不产生出站请求", async () => {
+    await setDomainRestriction(db, true, userId);
+    await db.insert(contentSources).values({
+      id: "src-outside",
+      name: "白名单外",
+      kind: "feed",
+      endpoint: "https://outside.example.org/rss",
+      status: "enabled",
+      createdBy: userId,
+    });
+    const sub = await createSubscription(db, {
+      sourceId: "src-outside",
+      externalId: "https://outside.example.org/rss",
+      title: "白名单外",
+      actorId: userId,
+    });
+    requestLog.length = 0;
+    const outcome = await syncSubscriptionToc(db, undefined, sub.subscriptionId, "manual");
     expect(outcome.status).toBe("failed");
-    expect(outcome.message).toMatch(/未获授权确认/);
+    expect(outcome.message).toMatch(/域名限定/);
     expect(requestLog).toHaveLength(0);
   });
 
-  it("授权依据太短时拒绝登记", async () => {
-    await expect(
-      addDomain(db, { host: "x.example.net", authorizationNote: "无", actorId: userId })
-    ).rejects.toThrow(/授权依据/);
-  });
-
-  it("子域自动继承父域授权", async () => {
+  it("开启限定后，子域继承父域放行", async () => {
+    await setDomainRestriction(db, true, userId);
     responses.set(
       "https://cdn.feed.example.com/rss",
       makeRss([{ title: "第1章", link: "https://cdn.feed.example.com/c/1" }])
@@ -134,6 +170,69 @@ describe("域名白名单", () => {
     });
     const outcome = await syncSubscriptionToc(db, undefined, sub.subscriptionId, "manual");
     expect(outcome.status).toBe("ok");
+  });
+
+  it("备注可以留空", async () => {
+    await expect(addDomain(db, { host: "x.example.net", actorId: userId })).resolves.toMatchObject({
+      host: "x.example.net",
+    });
+  });
+});
+
+/**
+ * 回归：addDomain 曾经只往下降不往上升，源会永久卡在 blocked，
+ * 而 UI 上「启用」按钮在 blocked 时恰好禁用 —— 无法自救。
+ */
+describe("blocked 源的恢复路径", () => {
+  beforeEach(async () => {
+    await setDomainRestriction(db, true, userId);
+  });
+
+  it("添加域名后，此前被挡下的源自动恢复启用", async () => {
+    const created = await createSource(db, {
+      name: "先建后授权",
+      kind: "feed",
+      endpoint: "https://later.example.org/rss",
+      actorId: userId,
+    });
+    expect(created.status).toBe("blocked");
+
+    const result = await addDomain(db, { host: "later.example.org", actorId: userId });
+    expect(result.unblocked).toBeGreaterThanOrEqual(1);
+
+    const row = await db.select().from(contentSources).where(eq(contentSources.id, created.id)).get();
+    expect(row?.status).toBe("enabled");
+  });
+
+  it("关闭域名限定后，被挡下的源一并恢复", async () => {
+    const created = await createSource(db, {
+      name: "等开关关掉",
+      kind: "feed",
+      endpoint: "https://waiting.example.org/rss",
+      actorId: userId,
+    });
+    expect(created.status).toBe("blocked");
+
+    const result = await setDomainRestriction(db, false, userId);
+    expect(result.unblocked).toBeGreaterThanOrEqual(1);
+
+    const row = await db.select().from(contentSources).where(eq(contentSources.id, created.id)).get();
+    expect(row?.status).toBe("enabled");
+  });
+
+  it("手动启用不再被 blocked 状态挡住", async () => {
+    const created = await createSource(db, {
+      name: "手动救回",
+      kind: "feed",
+      endpoint: "https://manual.example.org/rss",
+      actorId: userId,
+    });
+    expect(created.status).toBe("blocked");
+    // 限定仍开着且域名不在白名单，启用应当被拒绝并给出原因
+    await expect(updateSourceStatus(db, created.id, "enabled", userId)).rejects.toThrow(/域名限定/);
+
+    await addDomain(db, { host: "manual.example.org", actorId: userId });
+    await expect(updateSourceStatus(db, created.id, "enabled", userId)).resolves.toBe("enabled");
   });
 });
 
@@ -395,13 +494,24 @@ describe("findDueSources", () => {
   });
 });
 
-describe("撤销域名授权", () => {
-  it("撤销后该域名下的源立即变为 blocked", async () => {
+describe("移除白名单域名", () => {
+  it("限定开启时，移除域名会让该域名下的源停抓", async () => {
     const { removeDomain } = await import("~/server/sources/service");
+    await setDomainRestriction(db, true, userId);
     await removeDomain(db, "feed.example.com", userId);
+
     const source = await db.select().from(contentSources).where(eq(contentSources.id, sourceId)).get();
     expect(source?.status).toBe("blocked");
     const remaining = await db.select().from(sourceDomains).all();
     expect(remaining).toHaveLength(0);
+  });
+
+  it("限定关闭时，移除域名不影响任何源（白名单本就不生效）", async () => {
+    const { removeDomain } = await import("~/server/sources/service");
+    const result = await removeDomain(db, "feed.example.com", userId);
+
+    expect(result.blocked).toBe(0);
+    const source = await db.select().from(contentSources).where(eq(contentSources.id, sourceId)).get();
+    expect(source?.status).toBe("enabled");
   });
 });

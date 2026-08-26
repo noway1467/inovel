@@ -1,5 +1,9 @@
-import { sourceDomains } from "drizzle/schema";
+import { eq } from "drizzle-orm";
+import { siteSettings, sourceDomains } from "drizzle/schema";
 import type { AppDb } from "~/server/db";
+
+/** 站点设置键：是否用白名单限定可抓域名（默认关闭） */
+export const domainRestrictionKey = "sources.restrictDomains";
 
 /**
  * 所有出站抓取的唯一入口。三道闸：
@@ -65,6 +69,17 @@ export function parseSourceUrl(raw: string): { ok: true; url: URL } | FetchRejec
   return { ok: true, url };
 }
 
+/**
+ * 入库前的地址归一化。
+ *
+ * 必须只有这一处实现：`new URL("https://a.com").toString()` 会补出尾斜杠，
+ * 若写入用归一化后的值、查重却用原始值，同一个源每次导入都会新增一行。
+ */
+export function normalizeEndpoint(raw: string): string | null {
+  const parsed = parseSourceUrl(raw);
+  return parsed.ok ? parsed.url.toString() : null;
+}
+
 /** 白名单命中规则：精确匹配域名，或作为其子域 */
 export function hostMatchesAllowlist(host: string, allowlist: string[]): boolean {
   const target = host.toLowerCase();
@@ -79,15 +94,34 @@ export async function loadAllowlist(db: AppDb): Promise<string[]> {
   return rows.map((row) => row.host);
 }
 
+/**
+ * 域名限定默认关闭：源导入后立即可用，不需要额外确认步骤。
+ *
+ * 只有运营方主动在站点设置里打开 `sources.restrictDomains` 时，
+ * 才会用 source_domains 白名单做限定 —— 那是给需要收窄抓取范围的
+ * 部署留的可选开关，不是默认门槛。
+ */
+export async function isDomainRestrictionEnabled(db: AppDb): Promise<boolean> {
+  const row = await db
+    .select({ value: siteSettings.value })
+    .from(siteSettings)
+    .where(eq(siteSettings.key, domainRestrictionKey))
+    .get();
+  const value = row?.value as { enabled?: boolean } | undefined;
+  return Boolean(value?.enabled);
+}
+
 export async function checkSourceUrl(db: AppDb, raw: string): Promise<UrlCheck> {
   const parsed = parseSourceUrl(raw);
   if (!parsed.ok) return parsed;
+  // 默认不限定域名；开关打开后才校验白名单
+  if (!(await isDomainRestrictionEnabled(db))) return parsed;
   const allowlist = await loadAllowlist(db);
   if (!hostMatchesAllowlist(parsed.url.hostname, allowlist)) {
     return {
       ok: false,
       code: "DOMAIN_NOT_ALLOWLISTED",
-      message: `域名未获授权确认：${parsed.url.hostname}。请先在「在线源 → 域名授权」登记，并说明授权依据。`,
+      message: `已开启域名限定，且 ${parsed.url.hostname} 不在白名单内。到「在线源 → 域名限定」添加，或关掉该开关。`,
     };
   }
   return parsed;

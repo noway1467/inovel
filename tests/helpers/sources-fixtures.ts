@@ -59,6 +59,11 @@ export function createSourceFixtures(raw: DatabaseSync) {
       before TEXT, after TEXT, reason TEXT, trace_id TEXT,
       created_at INTEGER NOT NULL DEFAULT ${now}
     );
+    CREATE TABLE site_settings (
+      id TEXT PRIMARY KEY, key TEXT NOT NULL, value TEXT NOT NULL,
+      description TEXT,
+      updated_at INTEGER NOT NULL DEFAULT ${now}
+    );
 
     CREATE TABLE source_domains (
       id TEXT PRIMARY KEY, host TEXT NOT NULL, authorization_note TEXT NOT NULL,
