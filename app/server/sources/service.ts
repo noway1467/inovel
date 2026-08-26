@@ -224,6 +224,25 @@ export async function createSource(db: AppDb, input: CreateSourceInput) {
     throw new Error("同步间隔需在 30 分钟至 7 天之间");
   }
 
+  /**
+   * 规则源必须带规则。
+   *
+   * 此前允许 kind="rules" 且 config 为空落库，这种源一定在搜索/同步时
+   * 抛「规则配置不完整」——错误发生在使用时，而非创建时，很难定位。
+   * 规则源只能由导入书源 JSON 产生，不能手工登记。
+   */
+  if (input.kind === "rules") {
+    const config = input.config ?? {};
+    const missing = ["tocList", "tocName", "tocUrl", "contentRule"].filter(
+      (key) => typeof config[key] !== "string" || !(config[key] as string).trim()
+    );
+    if (missing.length > 0) {
+      throw new Error(
+        `规则源需要完整规则（缺 ${missing.join(" / ")}）。请用「批量导入源」粘贴书源 JSON，不要手工登记规则源。`
+      );
+    }
+  }
+
   const { status, reason } = await resolveStatus(db, endpoint);
   const id = crypto.randomUUID();
   await db.insert(contentSources).values({

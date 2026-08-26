@@ -261,7 +261,7 @@ describe("batchImportSources", () => {
     expect(result.warned[0]?.warnings.length).toBeGreaterThan(0);
   });
 
-  it("坏条目单独记原因，不影响其余", async () => {
+  it("用不了的源直接丢弃，只计数，不影响其余", async () => {
     const result = await batchImportSources(db, {
       text: JSON.stringify([
         bookSource("好源", "a.example.org"),
@@ -270,8 +270,8 @@ describe("batchImportSources", () => {
       actorId: userId,
     });
     expect(result.totals.created).toBe(1);
-    expect(result.totals.rejected).toBe(1);
-    expect(result.rejected[0]?.name).toBe("缺目录");
+    expect(result.totals.usable).toBe(1);
+    expect(result.totals.dropped).toBe(1);
   });
 
   it("无法识别格式时给出可操作的报错", async () => {

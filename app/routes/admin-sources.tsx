@@ -494,6 +494,8 @@ function SourceCreateForm({
   busy: boolean;
   onSubmit: (body: Record<string, unknown>) => Promise<unknown>;
 }) {
+  // 规则源必须带规则，只能靠导入书源 JSON 产生，不在手工登记的选项里
+  const manualKinds = adapters.filter((adapter) => adapter.kind !== "rules");
   const [kind, setKind] = useState("opds");
   const [name, setName] = useState("");
   const [endpoint, setEndpoint] = useState("");
@@ -513,7 +515,7 @@ function SourceCreateForm({
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              {adapters.map((adapter) => (
+              {manualKinds.map((adapter) => (
                 <SelectItem key={adapter.kind} value={adapter.kind}>
                   {adapter.label}
                 </SelectItem>
@@ -625,9 +627,9 @@ interface BatchImportResult {
   bytes: number | null;
   created: { name: string; kind: string; status: string }[];
   reused: { name: string }[];
-  rejected: { name: string; reason: string }[];
+  droppedCount: number;
   warned: { name: string; warnings: string[] }[];
-  totals: { parsed: number; created: number; reused: number; rejected: number };
+  totals: { usable: number; created: number; reused: number; dropped: number };
 }
 
 /** 从清单地址或粘贴的 JSON 批量导入；书源与订阅源自动判别 */
@@ -643,7 +645,6 @@ function UrlImportForm({
   const [mode, setMode] = useState<"url" | "text">("url");
   const [url, setUrl] = useState("");
   const [text, setText] = useState("");
-  const [showRejected, setShowRejected] = useState(false);
 
   const canSubmit = mode === "url" ? url.trim().length > 0 : text.trim().length > 0;
 
@@ -702,36 +703,24 @@ function UrlImportForm({
       {result && (
         <div className="mt-4 space-y-1.5 border-t border-border pt-3 text-sm">
           <p className="font-medium">
-            解析 {result.totals.parsed} 个 · 新建 {result.totals.created} · 复用{" "}
-            {result.totals.reused} · 跳过 {result.totals.rejected}
+            已启用 {result.totals.usable} 个源
+            {result.totals.reused > 0 && `（其中 ${result.totals.reused} 个此前已有）`}
           </p>
           <p className="text-xs text-muted-foreground">
-            格式：{result.format === "bookSource" ? "书源" : result.format === "rssSource" ? "订阅源" : result.format}
+            {result.format === "bookSource" ? "书源" : result.format === "rssSource" ? "订阅源" : result.format}
             {result.bytes !== null && ` · ${(result.bytes / 1024).toFixed(0)} KB`}
+            {/* 用不了的源已丢弃：这些源本就不可能工作，逐条列原因没有价值 */}
+            {result.totals.dropped > 0 && ` · 已自动剔除 ${result.totals.dropped} 个不可用的`}
           </p>
-          {result.finalUrl && (
-            <p className="truncate text-xs text-muted-foreground">实际地址：{result.finalUrl}</p>
-          )}
           {result.warned.length > 0 && (
             <p className="text-xs text-muted-foreground">
-              {result.warned.length} 个源有降级（多为搜索需 JS 求值，目录与正文不受影响）
+              {result.warned.length} 个源不支持搜索（其目录与正文仍可用）
             </p>
           )}
-          {result.totals.rejected > 0 && (
-            <div>
-              <Button size="sm" variant="ghost" onClick={() => setShowRejected((v) => !v)}>
-                {showRejected ? "收起" : `查看 ${result.totals.rejected} 个跳过原因`}
-              </Button>
-              {showRejected && (
-                <ul className="mt-1 max-h-56 space-y-0.5 overflow-y-auto text-xs text-muted-foreground">
-                  {result.rejected.map((item, i) => (
-                    <li key={`${item.name}-${i}`}>
-                      {item.name}：{item.reason}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
+          {result.totals.usable > 0 && (
+            <p className="text-xs text-muted-foreground">
+              现在可以直接在站内搜索框里搜书了。
+            </p>
           )}
         </div>
       )}

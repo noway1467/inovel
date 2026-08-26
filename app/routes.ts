@@ -24,6 +24,8 @@ export default [
     route("admin/operations", "routes/admin-operations.tsx"),
     route("admin/sources", "routes/admin-sources.tsx"),
     route("notifications", "routes/notifications.tsx"),
+    route("source/:sourceId/book", "routes/source-book.tsx"),
+    route("source/:sourceId/chapter", "routes/source-chapter.tsx"),
   ]),
   route("read/:bookId/:chapterId", "routes/reader.tsx"),
   route("api/auth/*", "routes/api.auth.ts"),

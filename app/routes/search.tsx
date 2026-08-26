@@ -10,17 +10,40 @@ import { EmptyState } from "~/components/state/empty-state";
 import { cloudflareContext } from "~/server/context";
 import { createDb } from "~/server/db";
 import { searchBooks } from "~/server/repositories/books";
+import { aggregateSearch } from "~/server/sources/search";
 
 const hotWords = ["星海拾荒者", "盛唐小吏", "剑出昆仑", "系统", "重生", "都市"];
 
 export async function loader({ request, context }: Route.LoaderArgs) {
   const url = new URL(request.url);
   const q = url.searchParams.get("q")?.trim() ?? "";
-  if (!q) return { query: "", results: [] };
+  if (!q) return { query: "", results: [], sourceBooks: [], sourceStats: null };
   const { env } = context.get(cloudflareContext);
   const db = createDb(env.DB_APP);
-  const results = await searchBooks(db, q, 30);
-  return { query: q, results };
+
+  /**
+   * 本站书库与在线源并行查。
+   *
+   * 在线源要出站抓取，慢且可能失败，所以单独 catch —— 源全挂也不能
+   * 影响本站结果。整体再套一层时限，避免搜索页被慢源拖住。
+   */
+  const [results, aggregate] = await Promise.all([
+    searchBooks(db, q, 30),
+    aggregateSearch(db, q, { perSourceLimit: 5, timeoutMs: 8_000 }).catch(() => null),
+  ]);
+
+  return {
+    query: q,
+    results,
+    sourceBooks: aggregate?.books.slice(0, 40) ?? [],
+    sourceStats: aggregate
+      ? {
+          queried: aggregate.totals.sourcesQueried,
+          ok: aggregate.totals.sourcesOk,
+          books: aggregate.totals.books,
+        }
+      : null,
+  };
 }
 
 function toSummary(book: Awaited<ReturnType<typeof searchBooks>>[number]): BookSummary {
@@ -98,11 +121,86 @@ export default function SearchPage({ loaderData }: Route.ComponentProps) {
           </section>
         </div>
       ) : (
-        <section>
-          <p className="mb-3 text-sm text-muted-foreground">
-            关键词“{loaderData.query}”共找到 {loaderData.results.length} 部作品
-          </p>
-          {loaderData.results.length === 0 ? (
+        <div className="space-y-6">
+          <section>
+            <p className="mb-3 text-sm text-muted-foreground">
+              本站书库：找到 {loaderData.results.length} 部
+            </p>
+            {loaderData.results.length === 0 ? (
+              <p className="rounded-lg border border-border bg-surface px-3 py-2.5 text-sm text-muted-foreground">
+                本站书库没有匹配结果。
+              </p>
+            ) : (
+              <div className="grid gap-1 rounded-xl border border-border bg-surface p-2 md:grid-cols-2">
+                {loaderData.results.map((book, i) => (
+                  <BookListItem key={book.id} book={toSummary(book)} seed={i} />
+                ))}
+              </div>
+            )}
+          </section>
+
+          {/* 在线源结果：点开即读，不需要先订阅或发布 */}
+          <section>
+            <div className="mb-3 flex flex-wrap items-baseline gap-2">
+              <h2 className="text-sm font-semibold">在线源</h2>
+              {loaderData.sourceStats && (
+                <span className="text-xs text-muted-foreground">
+                  查询 {loaderData.sourceStats.queried} 个源，{loaderData.sourceStats.ok} 个有响应，
+                  合并 {loaderData.sourceStats.books} 本
+                </span>
+              )}
+            </div>
+
+            {loaderData.sourceBooks.length === 0 ? (
+              <p className="rounded-lg border border-border bg-surface px-3 py-2.5 text-sm text-muted-foreground">
+                {loaderData.sourceStats && loaderData.sourceStats.queried > 0
+                  ? "在线源没有匹配结果。"
+                  : "还没有启用支持搜索的在线源。"}
+              </p>
+            ) : (
+              <ul className="space-y-2">
+                {loaderData.sourceBooks.map((book, i) => (
+                  <li
+                    key={`${book.title}-${i}`}
+                    className="rounded-lg border border-border bg-surface p-3"
+                  >
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-medium">{book.title}</span>
+                      {book.author && (
+                        <span className="text-xs text-muted-foreground">{book.author}</span>
+                      )}
+                      <Badge variant="secondary">{book.options.length} 个源</Badge>
+                    </div>
+                    {book.description && (
+                      <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
+                        {book.description}
+                      </p>
+                    )}
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {book.options.map((option) => (
+                        <Button
+                          key={`${option.sourceId}-${option.externalId}`}
+                          size="sm"
+                          variant="secondary"
+                          asChild
+                        >
+                          <a
+                            href={`/source/${option.sourceId}/book?url=${encodeURIComponent(
+                              option.externalId
+                            )}&title=${encodeURIComponent(book.title)}`}
+                          >
+                            {option.sourceName}
+                          </a>
+                        </Button>
+                      ))}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+
+          {loaderData.results.length === 0 && loaderData.sourceBooks.length === 0 && (
             <EmptyState
               title="没有找到相关作品"
               description="换个关键词试试，或浏览热门标签。"
@@ -112,14 +210,8 @@ export default function SearchPage({ loaderData }: Route.ComponentProps) {
                 </a>
               }
             />
-          ) : (
-            <div className="grid gap-1 rounded-xl border border-border bg-surface p-2 md:grid-cols-2">
-              {loaderData.results.map((book, i) => (
-                <BookListItem key={book.id} book={toSummary(book)} seed={i} />
-              ))}
-            </div>
           )}
-        </section>
+        </div>
       )}
     </div>
   );

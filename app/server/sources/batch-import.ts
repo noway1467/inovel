@@ -20,12 +20,16 @@ export interface BatchImportResult {
   finalUrl: string | null;
   bytes: number | null;
   created: { name: string; sourceId: string; kind: string; status: string }[];
-  /** 同地址已存在，跳过新建 */
+  /** 同地址已存在，复用不重复建 */
   reused: { name: string; sourceId: string }[];
-  rejected: { name: string; reason: string }[];
-  /** 转换成功但有降级的源 */
+  /**
+   * 用不了的源直接丢弃，只统计数量。
+   * 逐条列出跳过原因对使用者没有价值 —— 那些源本来就不可能工作。
+   */
+  droppedCount: number;
+  /** 转换成功但有降级的源（多为搜索需 JS，目录正文仍可用） */
   warned: { name: string; warnings: string[] }[];
-  totals: { parsed: number; created: number; reused: number; rejected: number };
+  totals: { usable: number; created: number; reused: number; dropped: number };
 }
 
 async function findByEndpoint(db: AppDb, endpoint: string) {
@@ -106,10 +110,13 @@ export async function batchImportSources(
 
   const format = detectListFormat(text);
   const { pending, rejected } = convertByFormat(text, format);
+  const droppedAtConvert = rejected.length;
 
   const created: BatchImportResult["created"] = [];
   const reused: BatchImportResult["reused"] = [];
   const warned: BatchImportResult["warned"] = [];
+  // 转换阶段就用不了的源，连同建源失败的一起计入丢弃
+  let dropped = droppedAtConvert;
 
   for (const item of pending) {
     if (item.warnings.length > 0) warned.push({ name: item.name, warnings: item.warnings });
@@ -135,11 +142,9 @@ export async function batchImportSources(
         kind: item.kind,
         status: result.status,
       });
-    } catch (error) {
-      rejected.push({
-        name: item.name,
-        reason: error instanceof Error ? error.message : String(error),
-      });
+    } catch {
+      // 建不起来的源直接丢，不打断整批
+      dropped += 1;
     }
   }
 
@@ -149,13 +154,13 @@ export async function batchImportSources(
     bytes,
     created,
     reused,
-    rejected,
+    droppedCount: dropped,
     warned,
     totals: {
-      parsed: pending.length,
+      usable: created.length + reused.length,
       created: created.length,
       reused: reused.length,
-      rejected: rejected.length,
+      dropped,
     },
   };
 }

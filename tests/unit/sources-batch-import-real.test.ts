@@ -71,18 +71,16 @@ describe.skipIf(!existsSync(bookListPath))("真实书源合集：完整导入路
     expect(enabled.length).toBe(result.totals.created);
   });
 
-  it("跳过的源都带可读原因，不静默丢弃", async () => {
+  it("用不了的源被丢弃并计数，可用数与建出的源一致", async () => {
     const body = readFileSync(bookListPath, "utf8");
     stubFetchWith(body, "https://cdn.example.net/x.json");
     const result = await batchImportSources(db, { url: "https://list.example.org/x.json", actorId: "u1" });
 
-    expect(result.rejected.length).toBeGreaterThan(0);
-    for (const item of result.rejected) {
-      expect(item.reason.length).toBeGreaterThan(0);
-    }
-    // 多数跳过应是"无目录规则"（有声源与发现页专用源）
-    const noToc = result.rejected.filter((r) => /目录规则/.test(r.reason));
-    expect(noToc.length).toBeGreaterThan(result.rejected.length / 2);
+    expect(result.totals.dropped).toBeGreaterThan(0);
+    // 可用数 = 新建 + 复用，与库里实际行数对得上
+    expect(result.totals.usable).toBe(result.totals.created + result.totals.reused);
+    const rows = await db.select().from(contentSources).all();
+    expect(rows).toHaveLength(result.totals.created);
   });
 
   it("重复导入同一清单不堆重复源", async () => {
