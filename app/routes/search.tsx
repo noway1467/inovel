@@ -9,6 +9,7 @@ import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import { EmptyState } from "~/components/state/empty-state";
 import { eq, sql } from "drizzle-orm";
+import { encodeSourceRef } from "~/lib/source-ref";
 import { contentSources } from "drizzle/schema";
 import { cloudflareContext } from "~/server/context";
 import { createDb } from "~/server/db";
@@ -262,7 +263,7 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
                     {/* 新标签页打开：搜索结果通常要挨个试几个源，
                         原地跳转会丢掉这一页的搜索结果 */}
                     <a
-                      href={`/source/${option.sourceId}/book?url=${encodeURIComponent(
+                      href={`/source/${option.sourceId}/book?url=${encodeSourceRef(
                         option.externalId
                       )}&title=${encodeURIComponent(book.title)}`}
                       target="_blank"

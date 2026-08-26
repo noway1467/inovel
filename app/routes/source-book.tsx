@@ -4,6 +4,7 @@ import type { Route } from "./+types/source-book";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { EmptyState } from "~/components/state/empty-state";
+import { decodeSourceRef, encodeSourceRef } from "~/lib/source-ref";
 import { cloudflareContext } from "~/server/context";
 import { createAuth } from "~/server/auth";
 import { createDb } from "~/server/db";
@@ -25,7 +26,8 @@ export async function loader({ request, context, params }: Route.LoaderArgs) {
   if (!session?.user) return redirect(loginRedirectTo(new URL(request.url)));
 
   const url = new URL(request.url);
-  const bookUrl = url.searchParams.get("url")?.trim() ?? "";
+  // 参数是编码后的 token，见 lib/source-ref
+  const bookUrl = decodeSourceRef(url.searchParams.get("url") ?? "");
   const title = url.searchParams.get("title")?.trim() ?? "未命名";
   const sourceId = params.sourceId ?? "";
   if (!bookUrl) return { error: "缺少书籍地址", title, sourceId, bookUrl: "", toc: null };
@@ -80,9 +82,9 @@ export default function SourceBookPage({ loaderData }: Route.ComponentProps) {
           {toc.chapters[0] && (
             <Button size="sm" asChild>
               <Link
-                to={`/source/${sourceId}/chapter?key=${encodeURIComponent(
+                to={`/source/${sourceId}/chapter?key=${encodeSourceRef(
                   toc.chapters[0].key
-                )}&title=${encodeURIComponent(title)}&book=${encodeURIComponent(bookUrl)}&i=0`}
+                )}&title=${encodeURIComponent(title)}&book=${encodeSourceRef(bookUrl)}&i=0`}
               >
                 从第一章开始
               </Link>
@@ -95,7 +97,7 @@ export default function SourceBookPage({ loaderData }: Route.ComponentProps) {
           </Button>
           <Button size="sm" variant="secondary" asChild>
             {/* 目录有缓存，加 refresh 参数绕过 */}
-            <a href={`?url=${encodeURIComponent(bookUrl)}&title=${encodeURIComponent(title)}`}>
+            <a href={`?url=${encodeSourceRef(bookUrl)}&title=${encodeURIComponent(title)}`}>
               <RefreshCw className="size-4" />
               刷新目录
             </a>
@@ -108,9 +110,9 @@ export default function SourceBookPage({ loaderData }: Route.ComponentProps) {
           {toc.chapters.map((chapter, index) => (
             <li key={chapter.key}>
               <Link
-                to={`/source/${sourceId}/chapter?key=${encodeURIComponent(
+                to={`/source/${sourceId}/chapter?key=${encodeSourceRef(
                   chapter.key
-                )}&title=${encodeURIComponent(title)}&book=${encodeURIComponent(
+                )}&title=${encodeURIComponent(title)}&book=${encodeSourceRef(
                   bookUrl
                 )}&i=${index}`}
                 className="block truncate px-3 py-2.5 text-sm hover:bg-muted"

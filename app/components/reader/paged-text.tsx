@@ -125,20 +125,29 @@ export function PagedText({
         else if (ratio > 0.67) goNext();
       }}
     >
+      {/*
+        宽度测出来之前不能开多列：columnWidth 为 1px 会把正文切成几千个
+        1px 宽的列，肉眼看就是一片空白。测量前先按普通流式渲染，
+        ResizeObserver 一到就切成分页。
+      */}
       <div
         ref={contentRef}
         data-reader-pagination
         className="h-full transition-transform duration-150"
-        style={{
-          height: "100%",
-          columnWidth: `${Math.max(1, size.width)}px`,
-          columnGap: 0,
-          columnRule: "0 none transparent",
-          columnFill: "auto",
-          fontSize: `${fontSize}px`,
-          lineHeight,
-          transform: `translateX(-${pageIndex * Math.max(1, size.width)}px)`,
-        }}
+        style={
+          size.width > 0
+            ? {
+                height: "100%",
+                columnWidth: `${size.width}px`,
+                columnGap: 0,
+                columnRule: "0 none transparent",
+                columnFill: "auto",
+                fontSize: `${fontSize}px`,
+                lineHeight,
+                transform: `translateX(-${pageIndex * size.width}px)`,
+              }
+            : { fontSize: `${fontSize}px`, lineHeight }
+        }
       >
         {heading && <h1 className="mb-6 text-center text-[1.3em] font-semibold">{heading}</h1>}
         {paragraphs.map((text, index) => (

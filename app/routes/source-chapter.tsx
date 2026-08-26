@@ -14,6 +14,7 @@ import {
   systemDarkQuery,
   type ReaderSettings,
 } from "~/components/reader/reader-settings";
+import { decodeSourceRef, encodeSourceRef } from "~/lib/source-ref";
 import { cloudflareContext } from "~/server/context";
 import { createAuth } from "~/server/auth";
 import { createDb } from "~/server/db";
@@ -34,9 +35,10 @@ export async function loader({ request, context, params }: Route.LoaderArgs) {
   if (!session?.user) return redirect(loginRedirectTo(new URL(request.url)));
 
   const url = new URL(request.url);
-  const chapterKey = url.searchParams.get("key")?.trim() ?? "";
+  // 参数是编码后的 token，见 lib/source-ref
+  const chapterKey = decodeSourceRef(url.searchParams.get("key") ?? "");
   const bookTitle = url.searchParams.get("title")?.trim() ?? "未命名";
-  const bookUrl = url.searchParams.get("book")?.trim() ?? "";
+  const bookUrl = decodeSourceRef(url.searchParams.get("book") ?? "");
   const index = Number.parseInt(url.searchParams.get("i") ?? "", 10);
   const sourceId = params.sourceId ?? "";
 
@@ -121,13 +123,13 @@ export default function SourceChapterPage({ loaderData }: Route.ComponentProps) 
 
   const chapterLink = useCallback(
     (target: { key: string; index: number }) =>
-      `/source/${sourceId}/chapter?key=${encodeURIComponent(
+      `/source/${sourceId}/chapter?key=${encodeSourceRef(
         target.key
-      )}&title=${encodeURIComponent(bookTitle)}&book=${encodeURIComponent(bookUrl)}&i=${target.index}`,
+      )}&title=${encodeURIComponent(bookTitle)}&book=${encodeSourceRef(bookUrl)}&i=${target.index}`,
     [sourceId, bookTitle, bookUrl]
   );
 
-  const tocHref = `/source/${sourceId}/book?url=${encodeURIComponent(
+  const tocHref = `/source/${sourceId}/book?url=${encodeSourceRef(
     bookUrl
   )}&title=${encodeURIComponent(bookTitle)}`;
 
