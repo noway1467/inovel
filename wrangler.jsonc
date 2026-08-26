@@ -13,6 +13,10 @@
   // 自定义域名按需填写，例如 { "pattern": "example.com", "zone_name": "example.com", "custom_domain": true }
   "routes": [],
   "preview_urls": false,
+  // 在线源自动更新：每小时挑出到期的源投队列，实际抓取在队列消费者里跑
+  "triggers": {
+    "crons": ["0 * * * *"],
+  },
   "vars": {
     // Turnstile 站点密钥（公开值，留空则登录跳过人机验证）
     "TURNSTILE_SITE_KEY": "",

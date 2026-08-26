@@ -3,6 +3,7 @@ import {
   BriefcaseBusiness,
   ChevronDown,
   ClipboardCheck,
+  Rss,
   SlidersHorizontal,
   UploadCloud,
   Users,
@@ -95,6 +96,13 @@ export function WorkbenchMenu({ isAuthor, isAdmin, compact = false }: WorkbenchM
             <DropdownMenuItem onSelect={() => openWorkbenchPage("/admin/operations")}>
               <SlidersHorizontal className="size-4" />
               内容运营
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => openWorkbenchPage("/admin/sources")}>
+              <Rss className="size-4" />
+              <span>
+                <span className="block">在线源</span>
+                <span className="block text-[10px] text-muted-foreground">导入源、订阅与自动更新</span>
+              </span>
             </DropdownMenuItem>
           </>
         )}

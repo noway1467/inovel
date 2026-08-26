@@ -7,6 +7,10 @@ export const queueEventTypes = {
   publishScheduledChapter: "PUBLISH_SCHEDULED_CHAPTER",
   aggregateRanking: "AGGREGATE_RANKING",
   cleanupOrphanObjects: "CLEANUP_ORPHAN_OBJECTS",
+  /** 同步一个在线源下的全部订阅（拉目录、登记新章） */
+  sourceSyncSource: "SOURCE_SYNC_SOURCE",
+  /** 抓取某订阅下待取正文的章节 */
+  sourceFetchChapters: "SOURCE_FETCH_CHAPTERS",
 } as const;
 
 export type QueueEventType = (typeof queueEventTypes)[keyof typeof queueEventTypes];

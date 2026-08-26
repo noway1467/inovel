@@ -4,17 +4,25 @@ import { importJobs } from "drizzle/schema";
 import type { AppDb } from "~/server/db";
 import { commitImportChunk, parseImportJob } from "~/server/imports/service";
 import { claimEvent, markEventFailed } from "~/server/queues/idempotency";
-import type { QueueMessageEnvelope } from "~/server/queues/messages";
+import { createEnvelope, queueEventTypes, type QueueMessageEnvelope } from "~/server/queues/messages";
+import { fetchPendingChapters, syncSource } from "~/server/sources/sync";
 
 export interface QueueHandlerResult {
   status: "processed" | "skipped" | "failed";
   reason?: string;
 }
 
+export interface QueueBindings {
+  /** 分片导入的续投队列，IMPORT_COMMIT 自己接自己 */
+  ingest: Queue<unknown> | undefined;
+  /** 在线源同步队列 */
+  jobs: Queue<unknown> | undefined;
+}
+
 export async function handleQueueMessage(
   db: AppDb,
   bucket: R2Bucket,
-  queue: Queue<unknown> | undefined,
+  queues: QueueBindings,
   message: QueueMessageEnvelope,
   handlerName: string
 ): Promise<QueueHandlerResult> {
@@ -38,7 +46,7 @@ export async function handleQueueMessage(
       case "IMPORT_COMMIT": {
         const payload = message.payload as { jobId?: string } | undefined;
         if (!payload?.jobId) throw new Error("IMPORT_COMMIT payload.jobId 缺失");
-        await commitImportChunk(db, bucket, queue, payload.jobId);
+        await commitImportChunk(db, bucket, queues.ingest, payload.jobId);
         break;
       }
       case "IMPORT_PARSE": {
@@ -50,6 +58,28 @@ export async function handleQueueMessage(
           splitChars: payload.splitChars,
           forceSplitByChars: payload.forceSplitByChars,
         });
+        break;
+      }
+      case "SOURCE_SYNC_SOURCE": {
+        const payload = message.payload as { sourceId?: string } | undefined;
+        if (!payload?.sourceId) throw new Error("SOURCE_SYNC_SOURCE payload.sourceId 缺失");
+        await syncSource(db, queues.jobs, payload.sourceId, "cron");
+        break;
+      }
+      case "SOURCE_FETCH_CHAPTERS": {
+        const payload = message.payload as { subscriptionId?: string } | undefined;
+        if (!payload?.subscriptionId) {
+          throw new Error("SOURCE_FETCH_CHAPTERS payload.subscriptionId 缺失");
+        }
+        const result = await fetchPendingChapters(db, bucket, payload.subscriptionId);
+        // 还有剩余待抓时继续投递，把长书拆成多轮，避免单次执行超时
+        if (result.fetched > 0 && queues.jobs) {
+          await queues.jobs.send(
+            createEnvelope(queueEventTypes.sourceFetchChapters, payload.subscriptionId, {
+              subscriptionId: payload.subscriptionId,
+            })
+          );
+        }
         break;
       }
       default:
