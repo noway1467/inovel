@@ -19,6 +19,20 @@ import type { SourceChapter } from "~/server/sources/types";
 const tocCacheTtlMs = 30 * 60 * 1000;
 const contentCacheTtlMs = 7 * 24 * 60 * 60 * 1000;
 
+/**
+ * 抓取管线版本号。**改动抓取/解析逻辑时必须 +1。**
+ *
+ * 为什么需要它：正文缓存 7 天。修好分页跟随之后，早先存进去的截断正文
+ * （只有第一页）会继续供 7 天 —— 部署完全正确，用户看到的还是旧内容，
+ * 而且没有任何迹象说明问题出在缓存。上一轮就是这样，只能手动逐章删 R2。
+ *
+ * 版本号进 key，改一次逻辑就等于把旧缓存全部作废，旧对象自然失活
+ * （R2 生命周期规则回收，不影响读取）。
+ *
+ * v2: 跟随正文/目录分页（数字分页器、`>` 符号、地址形状），滤掉翻页提示行
+ */
+const pipelineVersion = "v2";
+
 /** 源地址不能直接当 R2 键（含协议与斜杠），用摘要 */
 async function keyHash(value: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
@@ -29,11 +43,11 @@ async function keyHash(value: string): Promise<string> {
 }
 
 function tocCacheKey(sourceId: string, hash: string) {
-  return `source-cache/${sourceId}/toc/${hash}.json`;
+  return `source-cache/${pipelineVersion}/${sourceId}/toc/${hash}.json`;
 }
 
 function contentCacheKey(sourceId: string, hash: string) {
-  return `source-cache/${sourceId}/content/${hash}.json`;
+  return `source-cache/${pipelineVersion}/${sourceId}/content/${hash}.json`;
 }
 
 interface CachedEnvelope<T> {

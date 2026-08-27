@@ -18,6 +18,14 @@ export const maxResponseBytes = 2 * 1024 * 1024;
 export const fetchTimeoutMs = 15_000;
 /** 同一次同步内两次请求之间的最小间隔，避免把源站打挂 */
 export const politeDelayMs = 1_000;
+/**
+ * 翻同一份分页（目录第 N 页、正文第 N 页）时的间隔。
+ *
+ * 比 politeDelayMs 小：目录动辄二十页，1 秒一页光等就 20 秒，而这是用户
+ * 点开书时同步等着的。分页请求是同一份文档的续页，总量由 maxTocPages /
+ * maxContentPages 封顶，压到 300ms 仍远低于正常浏览器加载一个页面的并发量。
+ */
+export const paginationDelayMs = 300;
 
 const userAgent = "yuedu-ibook/0.1 (+subscription sync; contact site admin)";
 

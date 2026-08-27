@@ -118,6 +118,111 @@ describe("detectNextPageUrl：文字写「下一章」但其实是下一页", ()
 });
 
 /**
+ * 目录分页。真实来源：7kbook（www.7kbook.com）斗破苍穹共 1907 章，
+ * 目录每页约 100 章，分 20 页。分页器整排都没有「下一页」字样：
+ *   <a class="page-link" href="/0/143/index_1.html">1</a>
+ *   <a class="page-link" href="/0/143/index_2.html">2</a>
+ *   <a class="page-link" href="/0/143/index_3.html">3</a>
+ *   <a class="page-link" href="/0/143/index_2.html">&gt;</a>
+ * 且第 1 页就挂在目录地址 `/0/143/` 上，不是 index_1.html。
+ */
+function sevenKPager(current: number, last = 20): string {
+  const window = [current - 1, current, current + 1].filter((n) => n >= 1 && n <= last);
+  const numbered = window
+    .map((n) => `<a class="page-link" href="/0/143/index_${n}.html">${n}</a>`)
+    .join("");
+  const next =
+    current < last
+      ? `<a class="page-link" href="/0/143/index_${current + 1}.html">&gt;</a>`
+      : "";
+  return `<html><body>
+    <div class="mulu">
+      <a href="/0/143/155832.html">第一章 陨落的天才</a>
+      <a href="/0/143/155833.html">第二章 斗之气三段</a>
+    </div>
+    <div class="pagination">${numbered}${next}</div>
+  </body></html>`;
+}
+
+describe("目录分页：数字分页器与符号按钮", () => {
+  it("从目录地址跟到第 2 页（第 1 页挂在目录上，不是 index_1）", () => {
+    const doc = parseHtml(sevenKPager(1));
+    expect(detectNextPageUrl(doc, "http://www.7kbook.com/0/143/")).toBe(
+      "http://www.7kbook.com/0/143/index_2.html"
+    );
+  });
+
+  it("中间页逐页往后", () => {
+    expect(detectNextPageUrl(parseHtml(sevenKPager(2)), "http://www.7kbook.com/0/143/index_2.html")).toBe(
+      "http://www.7kbook.com/0/143/index_3.html"
+    );
+    expect(
+      detectNextPageUrl(parseHtml(sevenKPager(19)), "http://www.7kbook.com/0/143/index_19.html")
+    ).toBe("http://www.7kbook.com/0/143/index_20.html");
+  });
+
+  it("末页停住（没有 21，也没有 > 按钮）", () => {
+    const doc = parseHtml(sevenKPager(20));
+    expect(detectNextPageUrl(doc, "http://www.7kbook.com/0/143/index_20.html")).toBeNull();
+  });
+
+  it("目录地址不会被章节链接骗走", () => {
+    // 关键回归：`/0/143/` 拆出来页码算 1，若不挡住目录形式，
+    // 章节地址 155833.html 会被当成「续页」
+    const doc = parseHtml(`<html><body>
+      <a href="/0/143/155832.html">第一章</a>
+      <a href="/0/143/155833.html">第二章</a>
+    </body></html>`);
+    expect(detectNextPageUrl(doc, "http://www.7kbook.com/0/143/")).toBeNull();
+  });
+
+  it("只有符号按钮时也能翻", () => {
+    const doc = parseHtml(`<html><body>
+      <a href="/0/143/index_5.html">&lt;</a>
+      <a href="/0/143/index_7.html">&gt;</a>
+    </body></html>`);
+    expect(detectNextPageUrl(doc, "http://www.7kbook.com/0/143/index_6.html")).toBe(
+      "http://www.7kbook.com/0/143/index_7.html"
+    );
+  });
+
+  it("不跟后退符号", () => {
+    const doc = parseHtml(`<html><body>
+      <a href="/0/143/index_5.html">&lt;</a>
+      <a href="/0/143/index_5.html">上一页</a>
+    </body></html>`);
+    expect(detectNextPageUrl(doc, "http://www.7kbook.com/0/143/index_6.html")).toBeNull();
+  });
+
+  it("不跟「末页」——会跳过中间所有页", () => {
+    const doc = parseHtml(`<html><body>
+      <a href="/0/143/index_20.html">末页</a>
+      <a href="/0/143/index_20.html">尾页</a>
+    </body></html>`);
+    expect(detectNextPageUrl(doc, "http://www.7kbook.com/0/143/index_2.html")).toBeNull();
+  });
+
+  it("章节号不会被当成页码（数字前必须有分隔符）", () => {
+    // 目录里章节标题恰好是纯数字的站：模板 /0/143/15583N.html 数字前是数字，
+    // 不是分隔符，不能当分页器
+    const doc = parseHtml(`<html><body>
+      <a href="/0/143/155832.html">1</a>
+      <a href="/0/143/155833.html">2</a>
+      <a href="/0/143/155834.html">3</a>
+    </body></html>`);
+    expect(detectNextPageUrl(doc, "http://www.7kbook.com/0/143/155832.html")).toBeNull();
+  });
+
+  it("跨目录、跨站的分页链接不跟", () => {
+    const doc = parseHtml(`<html><body>
+      <a href="/0/999/index_2.html">2</a>
+      <a href="http://other.com/0/143/index_2.html">2</a>
+    </body></html>`);
+    expect(detectNextPageUrl(doc, "http://www.7kbook.com/0/143/")).toBeNull();
+  });
+});
+
+/**
  * 跟随分页后，每页首尾的「第(N/3)页」都会落进正文中间 ——
  * 品书小说这一章拼完有 6 条。这些标记在正文容器里，必须在切段时滤掉。
  */

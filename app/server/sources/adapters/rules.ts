@@ -1,4 +1,9 @@
-import { delay, guardedFetch, politeDelayMs } from "~/server/sources/fetch-guard";
+import {
+  delay,
+  guardedFetch,
+  paginationDelayMs,
+  politeDelayMs,
+} from "~/server/sources/fetch-guard";
 import { parseHtml } from "~/server/sources/html";
 import { buildSearchUrl, degradeJsRule, type RulesConfig } from "~/server/sources/legado";
 import {
@@ -338,7 +343,7 @@ export const rulesAdapter: SourceAdapter = {
         !tocByRule && doc.kind === "html" ? detectNextPageUrl(doc.node, tocPageUrl) : null;
       const tocCandidate = tocByRule ?? tocDetected;
       pageUrl = tocCandidate && !visited.has(tocCandidate) ? tocCandidate : null;
-      if (pageUrl) await delay(politeDelayMs);
+      if (pageUrl) await delay(paginationDelayMs);
     }
 
     if (chapters.length > 0) return chapters;
@@ -408,7 +413,7 @@ export const rulesAdapter: SourceAdapter = {
         !byRule && doc.kind === "html" ? detectNextPageUrl(doc.node, currentUrl) : null;
       const candidate = byRule ?? detected;
       pageUrl = candidate && !visited.has(candidate) ? candidate : null;
-      if (pageUrl) await delay(politeDelayMs);
+      if (pageUrl) await delay(paginationDelayMs);
     }
 
     if (paragraphs.length === 0) throw new Error("正文规则未命中内容");
