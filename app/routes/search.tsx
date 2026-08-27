@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Form, useSearchParams } from "react-router";
-import { Loader2, Pause, Play, Search } from "lucide-react";
+import { Form, Link, useSearchParams } from "react-router";
+import { Compass, Loader2, Pause, Play, Search } from "lucide-react";
 import type { Route } from "./+types/search";
 import { BookListItem } from "~/components/book/book-list-item";
 import type { BookSummary } from "~/components/book/book-card";
@@ -406,6 +406,17 @@ export default function SearchPage({ loaderData }: Route.ComponentProps) {
 
       {!hasQuery ? (
         <div className="space-y-4">
+          {/*
+            分类浏览入口放在这里：一部分在线源的搜索规则需要 JS 求值、
+            降级后没有搜索能力，按分类浏览是它们唯一的进入方式。
+            搜索页空态正是「想找书但还没输入」的时刻。
+          */}
+          <Button variant="outline" className="w-full justify-start" asChild>
+            <Link to="/explore">
+              <Compass className="size-4" />
+              按分类浏览在线源
+            </Link>
+          </Button>
           <section>
             <h2 className="mb-2 text-sm font-semibold text-muted-foreground">热门搜索</h2>
             <div className="flex flex-wrap gap-2">

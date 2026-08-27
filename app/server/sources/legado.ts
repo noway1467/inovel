@@ -47,6 +47,20 @@ export interface RulesConfig {
   nextContentUrl?: string | null;
   /** 源站基地址，用于相对链接补全 */
   baseUrl?: string | null;
+
+  /**
+   * 发现页（分类浏览）。原样存书源写的模板，取书单时才解析 ——
+   * 这样解析器改进了不必重新导入一遍所有源。
+   *
+   * 存它的意义：有一批源搜索规则要 JS 求值、降级后没有搜索入口，
+   * 能读却找不到书。发现页规则大多还在，按分类浏览正好救回这批源。
+   */
+  exploreUrl?: string | null;
+  exploreList?: string | null;
+  exploreName?: string | null;
+  exploreAuthor?: string | null;
+  exploreBookUrl?: string | null;
+  exploreCover?: string | null;
 }
 
 interface LegadoSearchRule {
@@ -76,6 +90,14 @@ interface LegadoContentRule {
   nextContentUrl?: string;
 }
 
+interface LegadoExploreRule {
+  bookList?: string;
+  name?: string;
+  author?: string;
+  bookUrl?: string;
+  coverUrl?: string;
+}
+
 export interface LegadoBookSource {
   bookSourceName?: string;
   bookSourceUrl?: string;
@@ -87,6 +109,8 @@ export interface LegadoBookSource {
   ruleBookInfo?: LegadoInfoRule;
   ruleToc?: LegadoTocRule;
   ruleContent?: LegadoContentRule;
+  exploreUrl?: string;
+  ruleExplore?: LegadoExploreRule;
 }
 
 /**
@@ -123,6 +147,13 @@ interface LegadoFlatSource {
   ruleChapterUrlNext?: string;
   ruleBookContent?: string;
   ruleContentUrlNext?: string;
+  /** 发现页（分类浏览）。ruleFindUrl 里是分类清单，两种格式见 explore.ts */
+  ruleFindUrl?: string;
+  ruleFindList?: string;
+  ruleFindName?: string;
+  ruleFindAuthor?: string;
+  ruleFindNoteUrl?: string;
+  ruleFindCoverUrl?: string;
 }
 
 /** 仅在嵌套字段缺失时填入，嵌套格式的源完全不受影响 */
@@ -163,6 +194,14 @@ export function normalizeFlatSource(raw: LegadoBookSource & LegadoFlatSource): v
   const content = (raw.ruleContent ??= {});
   fillMissing(content, "content", clean(raw.ruleBookContent));
   fillMissing(content, "nextContentUrl", clean(raw.ruleContentUrlNext));
+
+  fillMissing(raw, "exploreUrl", clean(raw.ruleFindUrl));
+  const explore = (raw.ruleExplore ??= {});
+  fillMissing(explore, "bookList", clean(raw.ruleFindList));
+  fillMissing(explore, "name", clean(raw.ruleFindName));
+  fillMissing(explore, "author", clean(raw.ruleFindAuthor));
+  fillMissing(explore, "bookUrl", clean(raw.ruleFindNoteUrl));
+  fillMissing(explore, "coverUrl", clean(raw.ruleFindCoverUrl));
 }
 
 export interface ConversionResult {
@@ -395,6 +434,18 @@ export function convertLegadoSource(raw: unknown): ConversionResult {
     contentRule,
     nextContentUrl: validate(clean(source.ruleContent?.nextContentUrl), "正文分页", warnings),
     baseUrl: endpoint,
+
+    /**
+     * 发现页规则原样存下，不走 validate —— 分类地址里带 {{page}} 算术是常态，
+     * 按搜索地址那套标准会被判成"需要 JS"而丢掉。真正能不能用，
+     * 由 explore.ts 逐个分类判断（纯 page 算术能算，三元表达式跳过）。
+     */
+    exploreUrl: clean(source.exploreUrl),
+    exploreList: clean(source.ruleExplore?.bookList),
+    exploreName: clean(source.ruleExplore?.name),
+    exploreAuthor: clean(source.ruleExplore?.author),
+    exploreBookUrl: clean(source.ruleExplore?.bookUrl),
+    exploreCover: clean(source.ruleExplore?.coverUrl),
   };
 
   const weight = typeof source.weight === "number" && Number.isFinite(source.weight)

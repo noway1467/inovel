@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, redirect, useNavigate } from "react-router";
 import {
+  ArrowUpDown,
   BookmarkCheck,
   BookmarkPlus,
   ChevronLeft,
@@ -35,6 +36,12 @@ import { getLiveChapter, getLiveToc } from "~/server/sources/live-read";
 import { getPreferences } from "~/server/services/reader";
 import { getSourceReadingState } from "~/server/services/source-reading";
 import { loginRedirectTo } from "~/server/http/request-path";
+
+/**
+ * 目录抽屉每页章数。500 是权衡：再多手机上滑动掉帧，再少千章的书要翻十几页。
+ * 定位当前章和渲染分页共用，写死两处会悄悄脱节。
+ */
+const tocPageSize = 500;
 
 /**
  * 在线源单章阅读页。
@@ -132,7 +139,18 @@ export async function loader({ request, context, params }: Route.LoaderArgs) {
 }
 
 export default function SourceChapterPage({ loaderData }: Route.ComponentProps) {
-  const { chapter, nav, chapters, bookTitle, bookUrl, sourceId, error, preferences } = loaderData;
+  const {
+    chapter,
+    nav,
+    // loader 顶部有 redirect 分支，联合类型里 chapters 可能缺；
+    // 目录定位的 hook 在提前 return 之前跑，必须有值
+    chapters = [],
+    bookTitle,
+    bookUrl,
+    sourceId,
+    error,
+    preferences,
+  } = loaderData;
   const navigate = useNavigate();
 
   const [settings, setSettings] = useState<ReaderSettings>(defaultReaderSettings);
@@ -142,6 +160,9 @@ export default function SourceChapterPage({ loaderData }: Route.ComponentProps) 
   const [uiVisible, setUiVisible] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [tocOpen, setTocOpen] = useState(false);
+  const [tocDescending, setTocDescending] = useState(false);
+  const [tocPage, setTocPage] = useState(0);
+  const currentTocRef = useRef<HTMLAnchorElement | null>(null);
   const [inShelf, setInShelf] = useState(loaderData.inShelf);
   const [shelfPending, setShelfPending] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -250,6 +271,32 @@ export default function SourceChapterPage({ loaderData }: Route.ComponentProps) 
     return () => clearTimeout(timer);
   }, [chapter?.chapterKey, bookUrl, nav?.title, nav?.currentIndex, pagination.pageIndex, postReading]);
 
+  /**
+   * 打开目录时先跳到当前章所在那一页。
+   *
+   * 之前抽屉总是停在第一章 —— 读到第八百章想看看前后有什么，得自己翻十几页。
+   * 换章、切正倒序后当前章所在页也会变，所以这几个都要跟。
+   *
+   * 放在提前 return（error / !chapter）之前：hook 必须每次渲染都调用，
+   * 顺序不能变。所以这里用 chapter?.chapterKey 而不是解构后的值。
+   */
+  const currentTocIndex = chapters.findIndex((item) => item.key === chapter?.chapterKey);
+  useEffect(() => {
+    if (!tocOpen || currentTocIndex < 0) return;
+    const position = tocDescending ? chapters.length - 1 - currentTocIndex : currentTocIndex;
+    setTocPage(Math.floor(position / tocPageSize));
+  }, [tocOpen, currentTocIndex, tocDescending, chapters.length]);
+
+  /** 跳到正确页之后，再把当前章滚到视野中间 */
+  useEffect(() => {
+    if (!tocOpen) return;
+    // 等抽屉动画和列表渲染完，否则量到的位置是旧的
+    const frame = requestAnimationFrame(() => {
+      currentTocRef.current?.scrollIntoView({ block: "center", behavior: "auto" });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [tocOpen, tocPage, tocDescending]);
+
   async function toggleShelf() {
     if (!bookUrl || shelfPending) return;
     setShelfPending(true);
@@ -299,6 +346,18 @@ export default function SourceChapterPage({ loaderData }: Route.ComponentProps) 
 
   const isLastPage = pagination.pageIndex >= pagination.pageCount - 1;
   const isFirstPage = pagination.pageIndex <= 0;
+
+  /**
+   * 目录抽屉的倒序与分页。
+   *
+   * 每页 500 章：千章的书全铺在抽屉里，打开就卡一下。
+   * 序号用章节真实位置，倒序只改显示顺序 —— 否则倒序时「第 1 章」指向最后一章。
+   */
+  const orderedToc = chapters.map((item, index) => ({ item, index }));
+  if (tocDescending) orderedToc.reverse();
+  const tocPageCount = Math.max(1, Math.ceil(orderedToc.length / tocPageSize));
+  const tocSafePage = Math.min(tocPage, tocPageCount - 1);
+  const visibleToc = orderedToc.slice(tocSafePage * tocPageSize, (tocSafePage + 1) * tocPageSize);
 
   return (
     <div
@@ -464,20 +523,59 @@ export default function SourceChapterPage({ loaderData }: Route.ComponentProps) 
             <SheetTitle>目录（{chapters.length} 章）</SheetTitle>
           </SheetHeader>
           <SheetBody className="p-0">
-            <ScrollArea className="h-[calc(100dvh-5rem)]">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/60 px-3 py-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setTocDescending((v) => !v)}
+                aria-label={tocDescending ? "切换为正序" : "切换为倒序"}
+              >
+                <ArrowUpDown className="size-4" />
+                {tocDescending ? "倒序" : "正序"}
+              </Button>
+              {tocPageCount > 1 && (
+                <div className="flex items-center gap-1">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={tocSafePage === 0}
+                    onClick={() => setTocPage(Math.max(0, tocSafePage - 1))}
+                  >
+                    上一页
+                  </Button>
+                  <span className="text-xs text-muted-foreground">
+                    {tocSafePage + 1}/{tocPageCount}
+                  </span>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={tocSafePage >= tocPageCount - 1}
+                    onClick={() => setTocPage(Math.min(tocPageCount - 1, tocSafePage + 1))}
+                  >
+                    下一页
+                  </Button>
+                </div>
+              )}
+            </div>
+            <ScrollArea className="h-[calc(100dvh-8rem)]">
               <ul className="divide-y divide-border/60">
-                {chapters.map((item, index) => {
+                {visibleToc.map(({ item, index }) => {
                   const current = item.key === chapter.chapterKey;
                   return (
                     <li key={`${item.key}-${index}`}>
                       <Link
+                        ref={current ? currentTocRef : undefined}
                         to={chapterLink({ key: item.key, index })}
                         onClick={() => setTocOpen(false)}
-                        className={`block truncate px-4 py-2.5 text-sm hover:bg-muted ${
+                        className={`flex items-baseline gap-2 px-4 py-2.5 text-sm hover:bg-muted ${
                           current ? "font-semibold text-primary" : ""
                         }`}
                       >
-                        {item.title}
+                        {/* 序号是章节真实位置，倒序只改显示顺序 */}
+                        <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
+                          {index + 1}
+                        </span>
+                        <span className="truncate">{item.title}</span>
                       </Link>
                     </li>
                   );

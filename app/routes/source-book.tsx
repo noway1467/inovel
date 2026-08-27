@@ -1,6 +1,13 @@
 import { useState } from "react";
 import { Link } from "react-router";
-import { BookmarkCheck, BookmarkPlus, BookOpenText, Play, RefreshCw } from "lucide-react";
+import {
+  ArrowUpDown,
+  BookmarkCheck,
+  BookmarkPlus,
+  BookOpenText,
+  Play,
+  RefreshCw,
+} from "lucide-react";
 import type { Route } from "./+types/source-book";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
@@ -83,6 +90,12 @@ export default function SourceBookPage({ loaderData }: Route.ComponentProps) {
   const { toc, title, error, sourceId, bookUrl, lastRead } = loaderData;
   const [inShelf, setInShelf] = useState(loaderData.inShelf);
   const [shelfPending, setShelfPending] = useState(false);
+  /**
+   * 目录倒序与分页都放客户端：整份目录 loader 已经取到了（在线源的目录是
+   * 一次抓完的），翻页再发请求纯属浪费，也会让已缓存的目录又走一遍网络。
+   */
+  const [descending, setDescending] = useState(false);
+  const [tocPage, setTocPage] = useState(0);
 
   async function toggleShelf() {
     if (shelfPending) return;
@@ -124,6 +137,24 @@ export default function SourceBookPage({ loaderData }: Route.ComponentProps) {
       </div>
     );
   }
+
+  /**
+   * 每页章数。500 是权衡：再多手机上滑动开始掉帧，再少则千章的书要翻十几页。
+   * 序号始终是章节在书里的真实位置，倒序只改显示顺序，不改序号 ——
+   * 否则倒序时点「第 1 章」跳到的是最后一章。
+   */
+  const tocPageSize = 500;
+  const ordered = descending
+    ? toc.chapters.map((chapter, index) => ({ chapter, index })).reverse()
+    : toc.chapters.map((chapter, index) => ({ chapter, index }));
+  const tocPageCount = Math.max(1, Math.ceil(ordered.length / tocPageSize));
+  // 章数变化（换书、刷新目录）后页码可能越界
+  const safePage = Math.min(tocPage, tocPageCount - 1);
+  const visibleChapters = ordered.slice(safePage * tocPageSize, (safePage + 1) * tocPageSize);
+  const tocRange = {
+    from: visibleChapters.length > 0 ? visibleChapters[0]!.index + 1 : 0,
+    to: visibleChapters.length > 0 ? visibleChapters[visibleChapters.length - 1]!.index + 1 : 0,
+  };
 
   return (
     <div className="mx-auto max-w-3xl space-y-4">
@@ -192,8 +223,56 @@ export default function SourceBookPage({ loaderData }: Route.ComponentProps) {
       </header>
 
       <section className="rounded-lg border border-border bg-surface p-2">
+        {/*
+          分页与倒序条。千章以上的书整页铺开有几万个 DOM 节点，
+          手机上滑动会卡，找最新章也得一路拉到底。
+        */}
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/60 px-2 pb-2">
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setDescending((v) => !v);
+                // 翻转后停在原来那一页没有意义，回第一页
+                setTocPage(0);
+              }}
+            >
+              <ArrowUpDown className="size-4" />
+              {descending ? "倒序" : "正序"}
+            </Button>
+            <span className="text-xs text-muted-foreground">
+              第 {tocRange.from}–{tocRange.to} 章
+            </span>
+          </div>
+
+          {tocPageCount > 1 && (
+            <div className="flex items-center gap-1">
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={safePage === 0}
+                onClick={() => setTocPage(Math.max(0, safePage - 1))}
+              >
+                上一页
+              </Button>
+              <span className="text-xs text-muted-foreground">
+                {safePage + 1}/{tocPageCount}
+              </span>
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={safePage >= tocPageCount - 1}
+                onClick={() => setTocPage(Math.min(tocPageCount - 1, safePage + 1))}
+              >
+                下一页
+              </Button>
+            </div>
+          )}
+        </div>
+
         <ul className="divide-y divide-border/60">
-          {toc.chapters.map((chapter, index) => (
+          {visibleChapters.map(({ chapter, index }) => (
             <li key={chapter.key}>
               <Link
                 to={`/source/${sourceId}/chapter?key=${encodeSourceRef(
@@ -201,9 +280,15 @@ export default function SourceBookPage({ loaderData }: Route.ComponentProps) {
                 )}&title=${encodeURIComponent(title)}&book=${encodeSourceRef(
                   bookUrl
                 )}&i=${index}`}
-                className="block truncate px-3 py-2.5 text-sm hover:bg-muted"
+                className={`flex items-baseline gap-2 px-3 py-2.5 text-sm hover:bg-muted ${
+                  chapter.key === lastRead?.chapterKey ? "font-semibold text-primary" : ""
+                }`}
               >
-                {chapter.title}
+                {/* 倒序时序号仍是章节在书里的真实位置，不跟着显示顺序变 */}
+                <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
+                  {index + 1}
+                </span>
+                <span className="truncate">{chapter.title}</span>
               </Link>
             </li>
           ))}

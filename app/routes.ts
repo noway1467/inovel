@@ -4,6 +4,8 @@ export default [
   layout("routes/app-layout.tsx", [
     index("routes/home.tsx"),
     route("search", "routes/search.tsx"),
+    /** 在线源分类浏览：给没有搜索入口的源提供进入方式 */
+    route("explore", "routes/explore-sources.tsx"),
     route("categories", "routes/categories.tsx"),
     route("categories/:slug", "routes/category.tsx"),
     route("rankings/:type", "routes/rankings.tsx"),

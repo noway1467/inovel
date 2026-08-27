@@ -24,6 +24,7 @@ import {
   setSubscriptionStatus,
   updateSourceStatus,
 } from "~/server/sources/service";
+import { exportFileName, exportLegadoJson } from "~/server/sources/export";
 import { quickImportAndSubscribe } from "~/server/sources/quick-import";
 import { batchImportSources } from "~/server/sources/batch-import";
 import { aggregateSearch } from "~/server/sources/search";
@@ -83,6 +84,32 @@ export async function loader({ request, context }: Route.LoaderArgs) {
         { status: 400 }
       );
     }
+  }
+
+  /**
+   * 导出书源为 Legado JSON，格式与批量导入一致，导出的文件能直接再导回来。
+   *
+   * 走 GET 直接回文件流：导出可能是几百个源、上百 KB，先取 JSON 再让前端
+   * 拼 blob 等于在内存里过两遍。带上当前筛选条件 —— 管理台按「验证可用」
+   * 筛完再导出，才是常见用法。
+   */
+  if (path.includes("/export")) {
+    const filtered = await listSourcesFiltered(admin.db, {
+      q: url.searchParams.get("q"),
+      kind: url.searchParams.get("kind"),
+      status: url.searchParams.get("status"),
+      verifyStatus: url.searchParams.get("verifyStatus"),
+    });
+    const { json, exported, skipped } = exportLegadoJson(filtered);
+    return new Response(json, {
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        "content-disposition": `attachment; filename="${exportFileName(exported)}"`,
+        // 供前端提示"导出 N 个、跳过 M 个"，跳过的是非规则源或没有正文规则的
+        "x-export-count": String(exported),
+        "x-export-skipped": String(skipped),
+      },
+    });
   }
 
   // 大批量导入后源可能有几百个，支持按名称/类型/状态/验证结果筛选

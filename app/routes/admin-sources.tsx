@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router";
 import {
   CloudDownload,
+  Download,
   Loader2,
   Pause,
   Plus,
@@ -1183,9 +1184,32 @@ function SourceFilterBar({
             <SelectItem value="untested">未验证</SelectItem>
           </SelectContent>
         </Select>
+
+        {/*
+          导出按当前筛选条件走：先筛「实测可用」再导出，是最常见的用法。
+          用 <a download> 而不是 fetch —— 浏览器直接存文件，不必把上百 KB
+          的 JSON 先读进内存再拼 blob。
+        */}
+        <Button variant="outline" size="sm" asChild>
+          <a href={exportHref(filter)} download>
+            <Download className="size-4" />
+            导出书源
+          </a>
+        </Button>
       </div>
     </div>
   );
+}
+
+/** 导出地址，带上当前筛选条件 */
+function exportHref(filter: SourceFilter): string {
+  const params = new URLSearchParams();
+  if (filter.q.trim()) params.set("q", filter.q.trim());
+  if (filter.kind) params.set("kind", filter.kind);
+  if (filter.status) params.set("status", filter.status);
+  if (filter.verifyStatus) params.set("verifyStatus", filter.verifyStatus);
+  const qs = params.toString();
+  return `/api/admin/sources/export${qs ? `?${qs}` : ""}`;
 }
 
 /** 批量操作条 */
