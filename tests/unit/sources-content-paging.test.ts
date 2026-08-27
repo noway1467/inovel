@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseHtml } from "~/server/sources/html";
+import { toParagraphs } from "~/server/sources/types";
 import { detectNextPageUrl, isSameChapterNextPage } from "~/server/sources/toc-detect";
 
 /**
@@ -113,5 +114,41 @@ describe("detectNextPageUrl：文字写「下一章」但其实是下一页", ()
       <a href="/0/143/155833.html">下一章</a>
     </body></html>`);
     expect(detectNextPageUrl(doc, "https://www.pinshu8.com/0/143/155832.html")).toBeNull();
+  });
+});
+
+/**
+ * 跟随分页后，每页首尾的「第(N/3)页」都会落进正文中间 ——
+ * 品书小说这一章拼完有 6 条。这些标记在正文容器里，必须在切段时滤掉。
+ */
+describe("toParagraphs 滤掉翻页提示", () => {
+  it("滤掉页码标记的各种写法", () => {
+    const lines = [
+      "第(1/3)页",
+      "第（2/3）页",
+      "第 3/3 页",
+      "(1/3)",
+      "1／2",
+      "本章未完，请点击下一页继续阅读",
+      "本章未完，点击下一页继续阅读。",
+    ].join("\n");
+    expect(toParagraphs(lines)).toEqual([]);
+  });
+
+  it("不误删正文", () => {
+    const prose = [
+      "斗气大陆，广袤无边。",
+      "萧炎的实力，在三年前便是九段斗之气，如今却只有 3/10 的水平。",
+      "第三页纸上写着一行小字。",
+      "他翻到第 2 页，看见了那句话。",
+    ].join("\n");
+    expect(toParagraphs(prose)).toHaveLength(4);
+  });
+
+  it("整章拼接后正文段落数不变、标记归零", () => {
+    // 复刻真实形状：每页首尾各一条标记，中间是正文
+    const page = (n: number) => [`第(${n}/3)页`, `第 ${n} 页的正文。`, `第(${n}/3)页`].join("\n");
+    const chapter = [page(1), page(2), page(3)].join("\n");
+    expect(toParagraphs(chapter)).toEqual(["第 1 页的正文。", "第 2 页的正文。", "第 3 页的正文。"]);
   });
 });

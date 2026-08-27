@@ -54,12 +54,28 @@ export interface SourceAdapter {
   ) => Promise<{ paragraphs: string[] }>;
 }
 
-/** 把正文文本切成段落，过滤空行 */
+/**
+ * 纯翻页提示行，不是正文。
+ *
+ * 分页站把「第(1/3)页」这类标记放在正文容器里，跟随分页后每页首尾各一条，
+ * 一章下来就有六七行夹在正文中间。整行只有这个标记时才算提示 ——
+ * 正文句子不会长成这样，所以不会误删。
+ */
+const pageMarkerPatterns = [
+  /^第?\s*[(（]?\s*\d{1,4}\s*[/／]\s*\d{1,4}\s*[)）]?\s*页?$/,
+  /^本章未完[，,]?\s*(请)?点击?下一页继续阅读[。.]?$/,
+];
+
+function isPageMarker(line: string): boolean {
+  return pageMarkerPatterns.some((pattern) => pattern.test(line));
+}
+
+/** 把正文文本切成段落，过滤空行与翻页提示 */
 export function toParagraphs(raw: string): string[] {
   return raw
     .split(/\n+/)
     .map((line) => line.replace(/\s+/g, " ").trim())
-    .filter((line) => line.length > 0);
+    .filter((line) => line.length > 0 && !isPageMarker(line));
 }
 
 /** 相对地址补全为绝对地址 */
