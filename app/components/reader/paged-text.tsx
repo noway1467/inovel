@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { resolveLineHeight } from "~/components/reader/reader-settings";
 
 /**
  * 按屏分页显示一段正文。
@@ -16,6 +17,11 @@ export interface PagedTextProps {
   /** 章节标题，排在正文前 */
   heading?: string | null;
   fontSize: number;
+  /**
+   * 行距，与 ReaderSettings.lineHeight 同一约定：百分数（180 表示 1.8 倍）。
+   * 之前这里把 180 直接当无单位倍数交给 CSS，一行行高就成了 fontSize×180，
+   * 正文被推到列外，看着就是"HTML 有内容但整页空白"。
+   */
   lineHeight: number;
   /** 页数与当前页变化时回调，供外层渲染页码与上下页按钮 */
   onPaginationChange?: (state: { pageIndex: number; pageCount: number }) => void;
@@ -45,6 +51,8 @@ export function PagedText({
   const [size, setSize] = useState({ width: 0, height: 0 });
   const [pageCount, setPageCount] = useState(1);
 
+  const resolvedLineHeight = resolveLineHeight(lineHeight);
+
   // 视口尺寸变化（窗口缩放、旋屏）后要重新测量分页
   useEffect(() => {
     const element = viewportRef.current;
@@ -73,7 +81,7 @@ export function PagedText({
     measurePages();
     const frame = requestAnimationFrame(measurePages);
     return () => cancelAnimationFrame(frame);
-  }, [size.width, size.height, fontSize, lineHeight, paragraphs, heading]);
+  }, [size.width, size.height, fontSize, resolvedLineHeight, paragraphs, heading]);
 
   // 页数变化后当前页可能越界（例如放大字号导致页数变多/变少）
   useEffect(() => {
@@ -140,7 +148,7 @@ export function PagedText({
         data-reader-pagination
         className="h-full transition-transform duration-150"
         style={
-          size.width > 0
+          size.width > 0 && size.height > 0
             ? {
                 height: "100%",
                 blockSize: `${size.height}px`,
@@ -150,10 +158,10 @@ export function PagedText({
                 columnRule: "0 none transparent",
                 columnFill: "auto",
                 fontSize: `${fontSize}px`,
-                lineHeight,
+                lineHeight: resolvedLineHeight,
                 transform: `translateX(-${pageIndex * size.width}px)`,
               }
-            : { fontSize: `${fontSize}px`, lineHeight }
+            : { fontSize: `${fontSize}px`, lineHeight: resolvedLineHeight }
         }
       >
         {heading && <h1 className="mb-6 text-center text-[1.3em] font-semibold">{heading}</h1>}

@@ -46,6 +46,20 @@ export function resolveReaderTheme(
   if (theme !== "system") return theme;
   return systemDark ? "ink" : "paper";
 }
+
+/**
+ * 行距百分数转 CSS 无单位倍数（180 → 1.8）。
+ *
+ * ReaderSettings.lineHeight 存的是百分数（面板滑块 140~240）。谁把它原样
+ * 交给 CSS line-height，一行行高就变成 fontSize×180；正文被推到列外，
+ * 页数也跟着炸（在线源阅读页曾因此整页空白）。两个阅读器都走这里，
+ * 免得约定再次跑偏。入参已经是倍数时原样返回。
+ */
+export function resolveLineHeight(value: number): number {
+  if (!Number.isFinite(value) || value <= 0) return defaultReaderSettings.lineHeight / 100;
+  return value > 10 ? value / 100 : value;
+}
+
 export type PaginationMode = "scroll" | "cover" | "none";
 
 export interface ReaderSettings {

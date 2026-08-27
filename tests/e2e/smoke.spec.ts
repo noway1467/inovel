@@ -91,9 +91,70 @@ test("作品详情到阅读器主链路可用，无横向溢出", async ({ page 
   });
   expect(flipStyle.columnRuleWidth).toBe("0px");
   expect(flipStyle.transitionDuration).toBe("0s");
+  const paginationSize = await detailPage.locator("[data-reader-pagination]").evaluate((element) => ({
+    contentWidth: element.getBoundingClientRect().width,
+    viewportWidth: element.parentElement?.getBoundingClientRect().width ?? 0,
+  }));
+  expect(Math.abs(paginationSize.contentWidth - paginationSize.viewportWidth)).toBeLessThanOrEqual(1);
+  // 行距必须是 CSS 倍数，不能把面板存的百分数（180）原样交给 line-height：
+  // 那样一行行高会变成 fontSize×180，正文被推到列外，整页空白且页数暴涨
+  const typography = await detailPage.locator("[data-reader-pagination]").evaluate((element) => {
+    const style = getComputedStyle(element);
+    return {
+      fontSize: Number.parseFloat(style.fontSize),
+      lineHeight: Number.parseFloat(style.lineHeight),
+    };
+  });
+  expect(typography.fontSize).toBeGreaterThan(0);
+  expect(typography.lineHeight / typography.fontSize).toBeLessThan(4);
+
   expect(
     await readerViewport.evaluate((element) => element.scrollHeight <= element.clientHeight + 1)
   ).toBe(true);
+
+  // 正文必须真的落在视口里，不能只是 HTML 有内容
+  const visibleText = await detailPage.evaluate(() => {
+    const nodes = Array.from(
+      document.querySelectorAll("[data-reader-pagination] p, [data-reader-pagination] h1")
+    ) as HTMLElement[];
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    return nodes.filter((node) => {
+      const rect = node.getBoundingClientRect();
+      return (
+        rect.right > 0 &&
+        rect.left < vw &&
+        rect.bottom > 0 &&
+        rect.top < vh &&
+        rect.width > 0 &&
+        rect.height > 0 &&
+        (node.textContent ?? "").trim().length > 0
+      );
+    }).length;
+  });
+  expect(visibleText).toBeGreaterThan(0);
+
+  // 逐页扫描：每一页都得有正文，页数不能虚高
+  const pageScan = await detailPage.locator("[data-reader-pagination]").evaluate((element) => {
+    const viewportWidth = element.parentElement?.clientWidth ?? 0;
+    if (viewportWidth <= 0) return { total: 0, blankPages: [] as number[] };
+    const total = Math.round(element.scrollWidth / viewportWidth);
+    const shift = new DOMMatrix(getComputedStyle(element).transform).m41;
+    const nodes = Array.from(element.querySelectorAll("p, h1")) as HTMLElement[];
+    const blankPages: number[] = [];
+    for (let page = 0; page < total; page++) {
+      const left = page * viewportWidth;
+      const right = left + viewportWidth;
+      const hit = nodes.some((node) => {
+        const rect = node.getBoundingClientRect();
+        return rect.right - shift > left + 1 && rect.left - shift < right - 1 && rect.height > 0;
+      });
+      if (!hit) blankPages.push(page + 1);
+    }
+    return { total, blankPages };
+  });
+  expect(pageScan.total).toBeGreaterThan(0);
+  expect(pageScan.blankPages).toEqual([]);
   const overflow = await detailPage.evaluate(
     () => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1
   );

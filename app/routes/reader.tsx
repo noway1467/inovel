@@ -20,6 +20,7 @@ import {
   loadReaderSettings,
   normalizePaginationMode,
   normalizeReaderTheme,
+  resolveLineHeight,
   resolveReaderTheme,
   systemDarkQuery,
   saveLocalProgress,
@@ -611,7 +612,7 @@ export default function ReaderPage({ loaderData }: Route.ComponentProps) {
 
   const bodyStyle = {
     fontSize: `${settings.fontSize}px`,
-    lineHeight: settings.lineHeight / 100,
+    lineHeight: resolveLineHeight(settings.lineHeight),
     textAlign: settings.align === "justify" ? ("justify" as const) : ("left" as const),
     letterSpacing: settings.letterSpacing === "wide" ? "0.06em" : "0",
     textIndent: settings.indent === "2char" ? "2em" : "0",
@@ -706,6 +707,15 @@ export default function ReaderPage({ loaderData }: Route.ComponentProps) {
               style={{
                 ...bodyStyle,
                 height: "100%",
+                // 显式锁宽高只在量到真实尺寸后才加：首帧 viewport 还是 0，
+                // blockSize:0 会把正文切成上千个空列
+                ...(viewport.width > 0 && viewport.height > 0
+                  ? {
+                      width: `${pageWidth}px`,
+                      inlineSize: `${pageWidth}px`,
+                      blockSize: `${viewport.height}px`,
+                    }
+                  : null),
                 columnWidth: `${pageWidth}px`,
                 columnGap: 0,
                 columnRule: "0 none transparent",
