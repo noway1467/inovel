@@ -144,12 +144,13 @@ export async function getLiveChapter(
   const key = contentCacheKey(sourceId, hash);
 
   const cached = await readCache<string[]>(bucket, key, contentCacheTtlMs);
-  if (cached) {
+  const cachedParagraphs = cached?.map((paragraph) => paragraph.trim()).filter(Boolean) ?? [];
+  if (cachedParagraphs.length > 0) {
     return {
       sourceId,
       sourceName: source.name,
       chapterKey,
-      paragraphs: cached,
+      paragraphs: cachedParagraphs,
       fromCache: true,
     };
   }
@@ -158,7 +159,9 @@ export async function getLiveChapter(
   const { paragraphs } = await adapter.fetchChapter(ctxFor(db, source), {
     externalKey: chapterKey,
   });
-  await writeCache(bucket, key, paragraphs);
+  const normalizedParagraphs = paragraphs.map((paragraph) => paragraph.trim()).filter(Boolean);
+  if (normalizedParagraphs.length === 0) throw new Error('正文为空');
+  await writeCache(bucket, key, normalizedParagraphs);
 
-  return { sourceId, sourceName: source.name, chapterKey, paragraphs, fromCache: false };
+  return { sourceId, sourceName: source.name, chapterKey, paragraphs: normalizedParagraphs, fromCache: false };
 }

@@ -271,12 +271,13 @@ export const rulesAdapter: SourceAdapter = {
       pages += 1;
 
       const doc = await loadDoc(ctx, pageUrl);
-      const parsed = evalRuleOne(doc, config.contentRule);
+      const parsed = evalRuleOne(doc, config.contentRule).trim();
       if (parsed) {
         // 正文规则多为 @html/@content，取出来的是 HTML 片段，需再解析分段；
         // 若已是纯文本，parseHtml 也能安全处理
         const text = parsed.includes("<") ? blockTextOf(parseHtml(parsed)) : parsed;
-        paragraphs.push(...toParagraphs(text));
+        const nextParagraphs = toParagraphs(text);
+        paragraphs.push(...(nextParagraphs.length > 0 ? nextParagraphs : toParagraphs(parsed)));
       }
 
       /**

@@ -64,10 +64,15 @@ export function PagedText({
    */
   useLayoutEffect(() => {
     const content = contentRef.current;
-    if (!content || size.width === 0) return;
+    if (!content || size.width === 0 || size.height === 0) return;
     const columnWidth = Math.max(1, size.width);
-    const next = Math.max(1, Math.round(content.scrollWidth / columnWidth));
-    setPageCount(next);
+    const measurePages = () => {
+      const next = Math.max(1, Math.ceil(content.scrollWidth / columnWidth));
+      setPageCount(next);
+    };
+    measurePages();
+    const frame = requestAnimationFrame(measurePages);
+    return () => cancelAnimationFrame(frame);
   }, [size.width, size.height, fontSize, lineHeight, paragraphs, heading]);
 
   // 页数变化后当前页可能越界（例如放大字号导致页数变多/变少）
