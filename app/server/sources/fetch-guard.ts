@@ -140,6 +140,8 @@ export interface GuardedFetchResult {
   body: string;
   contentType: string;
   truncated: boolean;
+  /** Retry-After 头原值，429/503 重试时按它退避 */
+  retryAfter?: string | null;
 }
 
 /**
@@ -147,7 +149,49 @@ export interface GuardedFetchResult {
  * allowlist 已由调用方通过 checkSourceUrl 校验过一次；这里再校验一次
  * 是为了拦住重定向到未授权域名的情况。
  */
+/**
+ * 值得重试的状态码。
+ *
+ * 503/502/504 是源站临时故障或限流，429 是明确限流 —— 这几种过一两秒再打
+ * 往往就成了。403/404 不重试：那是封禁或地址不存在，重试只是白等还更招封。
+ */
+const retriableStatuses = new Set([429, 500, 502, 503, 504]);
+/** 最多重试几次。总耗时要留在 fetchTimeoutMs 的预算内，2 次是上限。 */
+const maxRetries = 2;
+/** 首次退避毫秒数，之后翻倍（400 → 800） */
+const retryBackoffMs = 400;
+
+/**
+ * 带退避重试的抓取。
+ *
+ * 为什么需要：在线读书时源站偶发 503 会直接让用户看到"抓取失败"，
+ * 而这类错误大多是瞬时的 —— 我们并发打同一个域名时尤其容易触发。
+ * 重试一两次能把大部分 503 消化掉，用户完全感知不到。
+ *
+ * Retry-After 头如果有就听它的（但封顶 2 秒，免得被源站要求等 60 秒
+ * 把整个请求拖超时）。
+ */
 export async function guardedFetch(
+  db: AppDb,
+  raw: string,
+  init?: { headers?: Record<string, string> }
+): Promise<{ ok: true; result: GuardedFetchResult } | FetchRejection | { ok: false; code: "FETCH_FAILED"; message: string }> {
+  let last = await guardedFetchOnce(db, raw, init);
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    // 只有拿到了响应且状态码值得重试才重试；被闸拦下的（域名、SSRF）不重试
+    if (!last.ok || !retriableStatuses.has(last.result.status)) break;
+
+    const retryAfter = Number(last.result.retryAfter ?? "");
+    const wait = Number.isFinite(retryAfter) && retryAfter > 0
+      ? Math.min(retryAfter * 1000, 2_000)
+      : retryBackoffMs * 2 ** attempt;
+    await delay(wait);
+    last = await guardedFetchOnce(db, raw, init);
+  }
+  return last;
+}
+
+async function guardedFetchOnce(
   db: AppDb,
   raw: string,
   init?: { headers?: Record<string, string> }
@@ -208,6 +252,7 @@ export async function guardedFetch(
         body: decodeBody(merged, contentType),
         contentType,
         truncated,
+        retryAfter: response.headers.get("retry-after"),
       },
     };
   } catch (error) {

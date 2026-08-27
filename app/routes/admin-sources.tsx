@@ -114,6 +114,7 @@ export default function AdminSourcesPage({ loaderData }: Route.ComponentProps) {
   const [runs, setRuns] = useState<RunRow[]>([]);
   const [restrictionEnabled, setRestrictionEnabled] = useState(false);
   const [verifyOverview, setVerifyOverview] = useState<VerifyOverview | null>(null);
+  const [failReasons, setFailReasons] = useState<FailReasonCount[] | null>(null);
   const [quickResult, setQuickResult] = useState<QuickImportResult | null>(null);
   const [batchResult, setBatchResult] = useState<BatchImportResult | null>(null);
   const [selected, setSelected] = useState<string[]>([]);
@@ -138,7 +139,12 @@ export default function AdminSourcesPage({ loaderData }: Route.ComponentProps) {
       fetch("/api/admin/sources/subscriptions").then((r) => r.json()),
       fetch("/api/admin/sources/runs").then((r) => r.json()),
     ])) as [
-      { sources?: SourceRow[]; adapters?: AdapterInfo[]; verifyOverview?: VerifyOverview },
+      {
+        sources?: SourceRow[];
+        adapters?: AdapterInfo[];
+        verifyOverview?: VerifyOverview;
+        failReasons?: FailReasonCount[];
+      },
       { domains?: DomainRow[]; restrictionEnabled?: boolean },
       { subscriptions?: SubscriptionRow[] },
       { runs?: RunRow[] },
@@ -146,6 +152,7 @@ export default function AdminSourcesPage({ loaderData }: Route.ComponentProps) {
     setSources(main.sources ?? []);
     setAdapters(main.adapters ?? []);
     setVerifyOverview(main.verifyOverview ?? null);
+    setFailReasons(main.failReasons ?? null);
     setDomains(domainRes.domains ?? []);
     setRestrictionEnabled(Boolean(domainRes.restrictionEnabled));
     setSubscriptions(subRes.subscriptions ?? []);
@@ -251,7 +258,12 @@ export default function AdminSourcesPage({ loaderData }: Route.ComponentProps) {
         </TabsContent>
 
         <TabsContent value="sources" className="space-y-4">
-          <VerifyPanel overview={verifyOverview} busy={busy} onDone={loadAll} />
+          <VerifyPanel
+            overview={verifyOverview}
+            failReasons={failReasons}
+            busy={busy}
+            onDone={loadAll}
+          />
           <UrlImportForm
             busy={busy}
             result={batchResult}
@@ -639,6 +651,13 @@ interface VerifyOverview {
   skipped: number;
 }
 
+/** 失败原因分类计数，用于按原因精准清理 */
+interface FailReasonCount {
+  reason: string;
+  label: string;
+  count: number;
+}
+
 interface VerifyOutcome {
   sourceId: string;
   sourceName: string;
@@ -662,10 +681,13 @@ interface VerifyBatchResponse {
  */
 function VerifyPanel({
   overview,
+  failReasons,
   busy,
   onDone,
 }: {
   overview: VerifyOverview | null;
+  /** 各失败原因的数量，用于按原因精准清理 */
+  failReasons: FailReasonCount[] | null;
   busy: boolean;
   onDone: () => Promise<void>;
 }) {
@@ -790,6 +812,51 @@ function VerifyPanel({
         用常见关键字实跑「搜索 → 取目录」，两步都成才算可用；只测连通性分辨不出规则是否已失效。
       </p>
 
+      {/*
+        按失败原因分开删。原先「删除不可用」是一刀切，而 failed 里混着性质完全
+        不同的源：403 被封的基本没救，删掉干净；503 多半是当时打太急，
+        过一阵还能用，删了就白导入一遍。分开列出来让运营方自己挑。
+      */}
+      {failReasons && failReasons.length > 0 && (
+        <div className="mt-2 rounded-md border border-border/60 bg-background p-2">
+          <p className="mb-1.5 text-xs font-medium text-muted-foreground">
+            不可用的源按原因分类（点一类只删这一类）
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            {failReasons.map((item) => (
+              <Button
+                key={item.reason}
+                size="sm"
+                variant="outline"
+                className="h-7 px-2 text-xs"
+                disabled={running || busy}
+                title={`只删「${item.label}」这 ${item.count} 个源`}
+                onClick={async () => {
+                  const response = await fetch("/api/admin/sources/purge-failed", {
+                    method: "POST",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify({ reasons: [item.reason] }),
+                  });
+                  const data = (await response.json()) as { deleted?: number; error?: string };
+                  if (!response.ok) {
+                    setError(data.error ?? "清理失败");
+                    return;
+                  }
+                  setError("");
+                  await onDone();
+                }}
+              >
+                <Trash2 className="size-3 opacity-60" />
+                {item.label} {item.count}
+              </Button>
+            ))}
+          </div>
+          <p className="mt-1.5 text-[11px] text-muted-foreground">
+            建议先删「被封禁 403」「地址失效 4xx」；「源站故障 5xx」和「请求超时」多半是当时打太急，过一阵再验一遍还能用。
+          </p>
+        </div>
+      )}
+
       {/* 进度条 + 一行汇总，取代原来的纯文字进度 */}
       {(running || progress.checked > 0) && (
         <div className="mt-2">
@@ -888,10 +955,11 @@ function UrlImportForm({
       </p>
 
       <div className="mt-3 flex gap-2">
-        <Button size="sm" variant={mode === "url" ? "default" : "secondary"} onClick={() => setMode("url")}>
+        {/* 未选中用 outline 而不是 secondary：后者的实心底看着像禁用态 */}
+        <Button size="sm" variant={mode === "url" ? "default" : "outline"} onClick={() => setMode("url")}>
           清单地址
         </Button>
-        <Button size="sm" variant={mode === "text" ? "default" : "secondary"} onClick={() => setMode("text")}>
+        <Button size="sm" variant={mode === "text" ? "default" : "outline"} onClick={() => setMode("text")}>
           粘贴 JSON
         </Button>
       </div>
@@ -928,31 +996,62 @@ function UrlImportForm({
         导入
       </Button>
 
+      {/*
+        结果分三层：一个主数字、徽章分解、再是需要留意的降级说明。
+        原先是五行样式相同的小字段落堆在一起，扫一眼分不出哪个数字要紧。
+      */}
       {result && (
-        <div className="mt-4 space-y-1.5 border-t border-border pt-3 text-sm">
-          <p className="font-medium">
-            已启用 {result.totals.usable} 个源
-            {result.totals.reused > 0 && `（其中 ${result.totals.reused} 个此前已有）`}
-          </p>
-          <p className="text-xs text-muted-foreground">
-            {result.format === "bookSource" ? "书源" : result.format === "rssSource" ? "订阅源" : result.format}
-            {result.bytes !== null && ` · ${(result.bytes / 1024).toFixed(0)} KB`}
-            {/* 用不了的源已丢弃：这些源本就不可能工作，逐条列原因没有价值 */}
-            {result.totals.dropped > 0 && ` · 已自动剔除 ${result.totals.dropped} 个不可用的`}
-          </p>
-          {/* 降级分开说：两种降级影响不同，笼统一句"不支持搜索"会误导 */}
-          {result.totals.searchDisabled > 0 && (
-            <p className="text-xs text-muted-foreground">
-              {result.totals.searchDisabled} 个源不支持搜索（其目录与正文仍可用）
-            </p>
+        <div className="mt-4 border-t border-border pt-3">
+          <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+            <span className="text-2xl font-semibold tabular-nums text-primary">
+              {result.totals.usable}
+            </span>
+            <span className="text-sm font-medium">个源可用</span>
+            <span className="ml-auto text-xs text-muted-foreground">
+              {result.format === "bookSource"
+                ? "书源"
+                : result.format === "rssSource"
+                  ? "订阅源"
+                  : result.format}
+              {result.bytes !== null && ` · ${(result.bytes / 1024).toFixed(0)} KB`}
+            </span>
+          </div>
+
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {result.totals.created > 0 && (
+              <Badge variant="success">新增 {result.totals.created}</Badge>
+            )}
+            {result.totals.reused > 0 && (
+              <Badge variant="secondary" title="同地址的源已存在，直接复用，不重复建行">
+                复用 {result.totals.reused}
+              </Badge>
+            )}
+            {result.totals.dropped > 0 && (
+              <Badge variant="outline" title="缺正文规则、或规则需要 JS 引擎，这类源本就不可能工作">
+                剔除 {result.totals.dropped}
+              </Badge>
+            )}
+          </div>
+
+          {/* 两种降级影响不同，笼统一句「不支持搜索」会误导，分开写 */}
+          {(result.totals.searchDisabled > 0 || result.totals.tocDetected > 0) && (
+            <ul className="mt-2 space-y-1 text-xs text-muted-foreground">
+              {result.totals.searchDisabled > 0 && (
+                <li>
+                  {result.totals.searchDisabled} 个源不支持搜索，目录与正文仍可用 ——
+                  在「分类浏览」里能找到它们的书
+                </li>
+              )}
+              {result.totals.tocDetected > 0 && (
+                <li>
+                  {result.totals.tocDetected} 个源的目录规则需 JS 求值，已改为按页面结构自动探测
+                </li>
+              )}
+            </ul>
           )}
-          {result.totals.tocDetected > 0 && (
-            <p className="text-xs text-muted-foreground">
-              {result.totals.tocDetected} 个源的目录规则需 JS 求值，已改为自动探测目录
-            </p>
-          )}
+
           {result.totals.usable > 0 && (
-            <p className="text-xs text-muted-foreground">
+            <p className="mt-2 text-xs text-muted-foreground">
               现在可以直接在站内搜索框里搜书了。
             </p>
           )}

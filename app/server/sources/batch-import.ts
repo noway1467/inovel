@@ -1,4 +1,3 @@
-import { eq } from "drizzle-orm";
 import { contentSources } from "drizzle/schema";
 import type { AppDb } from "~/server/db";
 import { normalizeEndpoint } from "~/server/sources/fetch-guard";
@@ -43,10 +42,19 @@ export interface BatchImportResult {
   };
 }
 
-async function findByEndpoint(db: AppDb, endpoint: string) {
-  const normalized = normalizeEndpoint(endpoint);
-  if (!normalized) return null;
-  return db.select().from(contentSources).where(eq(contentSources.endpoint, normalized)).get();
+/**
+ * 一次把已有源的 endpoint → id 全取回来。
+ *
+ * 原先是循环里逐个 findByEndpoint，600 个源就是 600 次 D1 往返，
+ * 加上建源的 600 次，单请求 1200 次往返 —— 这是导入偶发 Error 1102
+ * （Worker 资源超限）的主要来源。一次查完在内存里比对，往返降到 1 次。
+ */
+async function loadEndpointIndex(db: AppDb): Promise<Map<string, string>> {
+  const rows = await db
+    .select({ id: contentSources.id, endpoint: contentSources.endpoint })
+    .from(contentSources)
+    .all();
+  return new Map(rows.map((row) => [row.endpoint, row.id]));
 }
 
 interface PendingSource {
@@ -146,6 +154,9 @@ export async function batchImportSources(
   let searchDisabled = 0;
   let tocDetected = 0;
 
+  // 已有源的 endpoint 索引：一次查完，循环里只查内存
+  const endpointIndex = await loadEndpointIndex(db);
+
   for (const item of pending) {
     if (item.warnings.length > 0) warned.push({ name: item.name, warnings: item.warnings });
     // 只统计真正进了库的：建不起来的源计入丢弃，不该再出现在降级提示里
@@ -155,10 +166,12 @@ export async function batchImportSources(
       if (kind.tocDetected) tocDetected += 1;
     };
     try {
-      // 同地址的源复用，反复导入同一清单不会堆出重复行与重复同步计划
-      const existing = await findByEndpoint(db, item.endpoint);
-      if (existing) {
-        reused.push({ name: item.name, sourceId: existing.id });
+      // 同地址的源复用，反复导入同一清单不会堆出重复行与重复同步计划。
+      // 查已有源的索引一次性载入（见 loadEndpointIndex），这里只查内存。
+      const normalized = normalizeEndpoint(item.endpoint);
+      const existingId = normalized ? endpointIndex.get(normalized) : undefined;
+      if (existingId) {
+        reused.push({ name: item.name, sourceId: existingId });
         countDegrade();
         continue;
       }
@@ -178,6 +191,8 @@ export async function batchImportSources(
         kind: item.kind,
         status: result.status,
       });
+      // 新建的也进索引：同一份清单里出现两条相同地址时，第二条才会走复用分支
+      if (normalized) endpointIndex.set(normalized, result.id);
       countDegrade();
     } catch {
       // 建不起来的源直接丢，不打断整批

@@ -22,6 +22,7 @@ import {
   type SourceBook,
   type SourceChapter,
 } from "~/server/sources/types";
+import { purifyParagraphs } from "~/server/sources/purify";
 import { blockTextOf } from "~/server/sources/xml";
 import {
   detectChapterList,
@@ -417,6 +418,14 @@ export const rulesAdapter: SourceAdapter = {
     }
 
     if (paragraphs.length === 0) throw new Error("正文规则未命中内容");
-    return { paragraphs };
+
+    /**
+     * 套用书源自带的净化规则，清掉广告、"本章未完"、"一秒记住…"这类杂物。
+     * 放在最后：分页已经拼完，规则里那些针对整章的模式（如"本章未完.*"）
+     * 才能正确命中；逐页净化会把每页尾巴都当成章尾。
+     */
+    const purified = purifyParagraphs(paragraphs, config.contentReplaceRegex);
+    // 净化把整章清空说明规则过激，宁可给原文也不能给空白页
+    return { paragraphs: purified.length > 0 ? purified : paragraphs };
   },
 };

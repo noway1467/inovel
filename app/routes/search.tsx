@@ -152,6 +152,15 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
   const [loading, setLoading] = useState(false);
   const [paused, setPaused] = useState(false);
   const [done, setDone] = useState(false);
+  /**
+   * 搜够了、但还有源没查完。
+   *
+   * 与 done 分开：done 是源真的查完了，没有下一批可查；satisfied 只是达到了
+   * 「某本书攒够 5 个源」的停止条件。原先两者都记成 done，于是攒够 5 个源就
+   * 彻底停住 —— 而那 5 个源里可能有几个实际打不开（403/503/超时），
+   * 用户看着有 5 条线路却一条也读不了，还没法让它继续找。
+   */
+  const [satisfied, setSatisfied] = useState(false);
   const [error, setError] = useState("");
 
   // 循环靠 ref 读取暂停状态与进度：state 要等重渲染才可见，循环里读不到
@@ -159,6 +168,11 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
   const offsetRef = useRef(0);
   const booksRef = useRef<SourceBook[]>([]);
   const runningRef = useRef(false);
+  /**
+   * 用户点过「继续搜索」后置位，本轮不再受 hasEnough 约束。
+   * 不然清掉 satisfied 重启循环，第一批回来 hasEnough 依旧成立，又立刻停住。
+   */
+  const keepGoingRef = useRef(false);
 
   // 换关键词时重置，避免上一次的结果串到下一次
   useEffect(() => {
@@ -168,10 +182,12 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
     setNextOffset(0);
     setPaused(false);
     setDone(false);
+    setSatisfied(false);
     setError("");
     pausedRef.current = false;
     offsetRef.current = 0;
     booksRef.current = [];
+    keepGoingRef.current = false;
   }, [query]);
 
   const loadBatch = useCallback(
@@ -233,8 +249,9 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
           return;
         }
         offsetRef.current = result.next;
-        if (hasEnough(booksRef.current)) {
-          setDone(true);
+        if (!keepGoingRef.current && hasEnough(booksRef.current)) {
+          // 搜够就暂停，但保留「继续搜索」的余地 —— 不当作查完
+          setSatisfied(true);
           return;
         }
       }
@@ -264,6 +281,18 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
     pausedRef.current = true;
   }
 
+  /**
+   * 搜够之后继续往下查剩余的源。
+   *
+   * 用途很实际：命中的那几个源可能有 403/503/超时打不开，得再找几条备用线路。
+   * 清掉 satisfied 再启动循环 —— 否则 hasEnough 仍然成立，会立刻又停下。
+   */
+  function continueSearch() {
+    setSatisfied(false);
+    keepGoingRef.current = true;
+    void runLoop();
+  }
+
   if (sourceCount === 0) {
     return (
       <section>
@@ -275,7 +304,9 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
     );
   }
 
-  const running = loading || (!paused && !done && nextOffset !== null);
+  const running = loading || (!paused && !done && !satisfied && nextOffset !== null);
+  /** 还有源没查完，且当前是停着的 —— 这时才给「继续搜索」 */
+  const canContinue = satisfied && nextOffset !== null && !loading;
 
   return (
     <section>
@@ -287,9 +318,26 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
         ) : null}
         <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
           {queried}/{sourceCount} 个源 · {okCount} 个有结果 · {books.length} 本
-          {paused ? " · 已暂停" : done ? " · 已完成" : ""}
+          {paused ? " · 已暂停" : done ? " · 已查完" : satisfied ? " · 已够用" : ""}
         </span>
-        {nextOffset !== null && !done && (
+
+        {/*
+          搜够但还有源没查时给「继续搜索」：命中的那几个源可能 403/503/超时
+          打不开，需要再找几条备用线路。
+        */}
+        {canContinue && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 shrink-0 px-2"
+            onClick={continueSearch}
+          >
+            <Play className="size-3.5" />
+            继续搜索
+          </Button>
+        )}
+
+        {nextOffset !== null && !done && !satisfied && (
           <Button variant="ghost" size="sm" className="h-7 shrink-0 px-2" onClick={togglePause}>
             {paused ? (
               <>
@@ -333,12 +381,10 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
                 {book.author && (
                   <span className="shrink-0 text-xs text-muted-foreground">{book.author}</span>
                 )}
-                {/* 精准命中标出来，用户一眼能分清哪条是自己要搜的 */}
-                {book.relevance >= preciseRelevance && (
-                  <Badge variant="success" className="shrink-0">
-                    精准
-                  </Badge>
-                )}
+                {/*
+                  不再显示「精准」标记：相关度已经决定了排序，最贴题的本来就在最前面，
+                  再挂个徽章反而让列表变花。relevance 仍然参与排序与停查判断。
+                */}
                 <span className="ml-auto shrink-0 text-xs text-muted-foreground">
                   {book.options.length} 源
                 </span>

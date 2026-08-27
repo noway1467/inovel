@@ -45,6 +45,14 @@ export interface RulesConfig {
   contentRule: string;
   /** 正文下一页地址；长章节分多页时靠它拼完整 */
   nextContentUrl?: string | null;
+  /**
+   * 正文净化规则（书源的 replaceRegex）。原样存，取正文时才解析执行。
+   *
+   * 书源作者写好的清理规则，专治广告、"本章未完"、"一秒记住…"、页码标记
+   * 这类删不掉的杂物。四种格式与安全边界见 purify.ts —— 这些正则来自第三方，
+   * 必须限长限量并挡掉会灾难性回溯的形状，否则能烧穿 Worker 的 CPU。
+   */
+  contentReplaceRegex?: string | null;
   /** 源站基地址，用于相对链接补全 */
   baseUrl?: string | null;
 
@@ -88,6 +96,7 @@ interface LegadoTocRule {
 interface LegadoContentRule {
   content?: string;
   nextContentUrl?: string;
+  replaceRegex?: string;
 }
 
 interface LegadoExploreRule {
@@ -147,6 +156,8 @@ interface LegadoFlatSource {
   ruleChapterUrlNext?: string;
   ruleBookContent?: string;
   ruleContentUrlNext?: string;
+  /** 正文净化规则，见 purify.ts */
+  ruleBookContentReplaceRegex?: string;
   /** 发现页（分类浏览）。ruleFindUrl 里是分类清单，两种格式见 explore.ts */
   ruleFindUrl?: string;
   ruleFindList?: string;
@@ -194,6 +205,7 @@ export function normalizeFlatSource(raw: LegadoBookSource & LegadoFlatSource): v
   const content = (raw.ruleContent ??= {});
   fillMissing(content, "content", clean(raw.ruleBookContent));
   fillMissing(content, "nextContentUrl", clean(raw.ruleContentUrlNext));
+  fillMissing(content, "replaceRegex", clean(raw.ruleBookContentReplaceRegex));
 
   fillMissing(raw, "exploreUrl", clean(raw.ruleFindUrl));
   const explore = (raw.ruleExplore ??= {});
@@ -433,6 +445,12 @@ export function convertLegadoSource(raw: unknown): ConversionResult {
     nextTocUrl: validate(clean(source.ruleToc?.nextTocUrl), "目录分页", warnings),
     contentRule,
     nextContentUrl: validate(clean(source.ruleContent?.nextContentUrl), "正文分页", warnings),
+    /**
+     * 净化规则原样存，不走 validate —— 它是正则而不是选择器，
+     * 按选择器那套判会被当成"无法翻译"丢掉。能不能安全执行由 purify.ts
+     * 逐条判（限长限量、挡掉灾难性回溯的形状）。
+     */
+    contentReplaceRegex: clean(source.ruleContent?.replaceRegex),
     baseUrl: endpoint,
 
     /**

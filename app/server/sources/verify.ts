@@ -1,4 +1,4 @@
-import { asc, eq, inArray, ne, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, ne, sql } from "drizzle-orm";
 import { contentSources, sourceStatus } from "drizzle/schema";
 import type { AppDb } from "~/server/db";
 import { getAdapter } from "~/server/sources/registry";
@@ -66,6 +66,77 @@ export const defaultVerifyKeyword = "第一";
  */
 export type VerifyStatus = "ok" | "failed" | "skipped";
 
+/**
+ * 失败原因分类。
+ *
+ * 为什么要分：原先失败一律记 failed，里面混着完全不同的毛病 —— 源站限流
+ * 返 503、站点封禁返 403、连不上超时、规则失效搜不到、搜到书但没目录。
+ * 这些该分开处理：403 的源基本没救可以删，503 多半是打太急、过一阵还能用，
+ * 规则失效的可以等作者更新。一锅端成 failed 就只能全删或全留。
+ */
+export type VerifyFailReason =
+  | "timeout" // 连不上或超过 verifyTimeoutMs
+  | "http_403" // 站点封禁（含 401/407）
+  | "http_429" // 明确限流
+  | "http_5xx" // 源站故障或限流，503 居多
+  | "http_4xx" // 其余 4xx，多为路径失效
+  | "no_search" // 搜索规则失效：一条也搜不到
+  | "irrelevant" // 搜索有返回但与关键字无关（源站不做匹配，回吐热门榜）
+  | "no_toc" // 能搜到书但目录为空或取不到
+  | "no_content" // 正文规则未命中
+  | "other";
+
+/**
+ * 从错误信息反推失败原因。
+ *
+ * 走 message 而不是逐个 return 传参：抛错点分散在适配器各处（搜索、列目录、
+ * 取章节），而 message 本来就带着 `源返回 HTTP 503`、`请求超时（15000ms）`
+ * 这些信息。集中在一处判，比在八个 return 里各塞一个字段好维护。
+ */
+export function classifyFailure(message: string): VerifyFailReason {
+  const text = message.toLowerCase();
+
+  if (text.includes("超时") || text.includes("timeout") || text.includes("aborted")) {
+    return "timeout";
+  }
+
+  const httpAt = /http\s*(\d{3})/.exec(text);
+  if (httpAt) {
+    const code = Number(httpAt[1]);
+    if (code === 403 || code === 401 || code === 407) return "http_403";
+    if (code === 429) return "http_429";
+    if (code >= 500) return "http_5xx";
+    if (code >= 400) return "http_4xx";
+  }
+
+  if (text.includes("与关键字无关") || text.includes("未做关键字匹配")) return "irrelevant";
+  if (text.includes("搜索无结果") || text.includes("未配置搜索规则")) return "no_search";
+  if (text.includes("目录为空") || text.includes("取目录失败") || text.includes("列目录失败")) {
+    return "no_toc";
+  }
+  if (text.includes("正文规则未命中")) return "no_content";
+
+  // 网络层没给状态码的连接失败也算超时一类：表现和处置方式一样
+  if (text.includes("fetch failed") || text.includes("network") || text.includes("连接")) {
+    return "timeout";
+  }
+  return "other";
+}
+
+/** 给管理台显示的中文说明 */
+export const failReasonLabels: Record<VerifyFailReason, string> = {
+  timeout: "请求超时",
+  http_403: "被封禁 403",
+  http_429: "被限流 429",
+  http_5xx: "源站故障 5xx",
+  http_4xx: "地址失效 4xx",
+  no_search: "搜不到书",
+  irrelevant: "结果与关键字无关",
+  no_toc: "没有目录",
+  no_content: "取不到正文",
+  other: "其它",
+};
+
 export interface VerifyOutcome {
   sourceId: string;
   sourceName: string;
@@ -73,6 +144,8 @@ export interface VerifyOutcome {
   searchHits: number;
   tocChapters: number;
   message: string;
+  /** 仅 failed 时有值，供管理台按原因筛选与精准清理 */
+  failReason?: VerifyFailReason;
 }
 
 export interface VerifyRunResult {
@@ -285,12 +358,20 @@ export async function verifySources(
 
   // 并发跑，各源互不相干；写回也在各自任务里做，省掉再排一轮
   const outcomes = await runPooled(targets, verifyConcurrency, async (source) => {
-    const outcome = await verifyOne(db, source, keyword, gapMs);
+    const raw = await verifyOne(db, source, keyword, gapMs);
+    /**
+     * 失败原因在这里统一分类一次 —— verifyOne 里有八个 failed 出口，
+     * 逐个塞字段容易漏，而 message 已经带着 HTTP 状态码与超时信息。
+     */
+    const outcome: VerifyOutcome =
+      raw.status === "failed" ? { ...raw, failReason: classifyFailure(raw.message) } : raw;
     await db
       .update(contentSources)
       .set({
         verifyStatus: outcome.status,
         verifyMessage: outcome.message.slice(0, 300),
+        // 原因写进独立列，管理台据此筛选与精准清理
+        verifyFailReason: outcome.failReason ?? null,
         verifiedAt: new Date(),
         verifySearchHits: outcome.searchHits,
         verifyTocChapters: outcome.tocChapters,
@@ -326,16 +407,48 @@ export async function verifySources(
  * 「只保留真正可用的源」用的就是这个：验证跑完后一键清掉坏源，
  * 剩下的都是实测能搜能读的。已入库的书籍不受影响。
  */
-export async function purgeFailedSources(db: AppDb): Promise<{ deleted: number }> {
-  const failed = await db
-    .select({ id: contentSources.id })
-    .from(contentSources)
-    .where(eq(contentSources.verifyStatus, "failed"))
-    .all();
+export async function purgeFailedSources(
+  db: AppDb,
+  /**
+   * 只删指定原因的失败源。不传就删全部失败源（保持原行为）。
+   *
+   * 分原因删是有必要的：403 被封的源基本没救，删掉干净；而 503 多半是当时
+   * 打太急，过一阵还能用，删了就白导入一遍。让运营方自己挑该删哪类。
+   */
+  reasons?: VerifyFailReason[]
+): Promise<{ deleted: number }> {
+  const condition =
+    reasons && reasons.length > 0
+      ? and(
+          eq(contentSources.verifyStatus, "failed"),
+          inArray(contentSources.verifyFailReason, reasons)
+        )
+      : eq(contentSources.verifyStatus, "failed");
+
+  const failed = await db.select({ id: contentSources.id }).from(contentSources).where(condition).all();
   if (failed.length === 0) return { deleted: 0 };
 
-  await db.delete(contentSources).where(eq(contentSources.verifyStatus, "failed"));
+  await db.delete(contentSources).where(condition);
   return { deleted: failed.length };
+}
+
+/** 各失败原因各有多少个源，供管理台显示「删掉这 N 个」 */
+export async function getFailReasonCounts(
+  db: AppDb
+): Promise<{ reason: VerifyFailReason; label: string; count: number }[]> {
+  const rows = await db
+    .select({ reason: contentSources.verifyFailReason, count: sql<number>`count(*)` })
+    .from(contentSources)
+    .where(eq(contentSources.verifyStatus, "failed"))
+    .groupBy(contentSources.verifyFailReason)
+    .all();
+
+  return rows
+    .map((row) => {
+      const reason = (row.reason ?? "other") as VerifyFailReason;
+      return { reason, label: failReasonLabels[reason] ?? "其它", count: Number(row.count) };
+    })
+    .sort((a, b) => b.count - a.count);
 }
 
 /** 验证概览，给管理台展示进度 */

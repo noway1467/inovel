@@ -29,7 +29,13 @@ import { quickImportAndSubscribe } from "~/server/sources/quick-import";
 import { batchImportSources } from "~/server/sources/batch-import";
 import { aggregateSearch } from "~/server/sources/search";
 import { bulkUpdateSources, listSourcesFiltered } from "~/server/sources/service";
-import { getVerifyOverview, purgeFailedSources, verifySources } from "~/server/sources/verify";
+import {
+  getFailReasonCounts,
+  getVerifyOverview,
+  purgeFailedSources,
+  verifySources,
+  type VerifyFailReason,
+} from "~/server/sources/verify";
 import { createSubscription, syncSource, syncSubscriptionToc } from "~/server/sources/sync";
 
 /**
@@ -99,6 +105,7 @@ export async function loader({ request, context }: Route.LoaderArgs) {
       kind: url.searchParams.get("kind"),
       status: url.searchParams.get("status"),
       verifyStatus: url.searchParams.get("verifyStatus"),
+      failReason: url.searchParams.get("failReason"),
     });
     const { json, exported, skipped } = exportLegadoJson(filtered);
     return new Response(json, {
@@ -119,10 +126,13 @@ export async function loader({ request, context }: Route.LoaderArgs) {
       kind: url.searchParams.get("kind"),
       status: url.searchParams.get("status"),
       verifyStatus: url.searchParams.get("verifyStatus"),
+      failReason: url.searchParams.get("failReason"),
     }),
     adapters: listAdapters(),
     overview: await getSourceOverview(admin.db),
     verifyOverview: await getVerifyOverview(admin.db),
+    // 各失败原因的数量，管理台据此显示「删掉这 N 个」
+    failReasons: await getFailReasonCounts(admin.db),
   });
 }
 
@@ -198,9 +208,17 @@ export async function action({ request, context }: Route.ActionArgs) {
       return Response.json(result);
     }
 
-    // 清掉验证失败的源，只留实测可用的
+    /**
+     * 清掉验证失败的源。可带 reasons 只删某几类 ——
+     * 403 被封的基本没救该删，503 多半是当时打太急、过一阵还能用，
+     * 不该一起删掉白导入一遍。不传 reasons 保持原来的全删行为。
+     */
     if (path.includes("/purge-failed")) {
-      const result = await purgeFailedSources(admin.db);
+      const body = (await request.json().catch(() => ({}))) as { reasons?: string[] };
+      const reasons = Array.isArray(body.reasons)
+        ? (body.reasons.filter((item) => typeof item === "string") as VerifyFailReason[])
+        : undefined;
+      const result = await purgeFailedSources(admin.db, reasons);
       return Response.json(result);
     }
 

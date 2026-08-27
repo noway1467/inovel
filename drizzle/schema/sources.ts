@@ -81,6 +81,14 @@ export const contentSources = sqliteTable(
      */
     verifyStatus: text("verify_status").notNull().default("untested"),
     verifyMessage: text("verify_message"),
+    /**
+     * 失败原因分类（timeout / http_403 / http_5xx / no_search / no_toc …）。
+     *
+     * 与 verify_message 分开存：message 是给人看的原话，这个是给筛选和批量
+     * 清理用的。原先失败一律 failed，403 那种基本没救的和 503 那种过一阵还能
+     * 用的混在一起，只能全删或全留。取值见 VerifyFailReason。
+     */
+    verifyFailReason: text("verify_fail_reason"),
     verifiedAt: integer("verified_at", { mode: "timestamp_ms" }),
     verifySearchHits: integer("verify_search_hits").notNull().default(0),
     verifyTocChapters: integer("verify_toc_chapters").notNull().default(0),

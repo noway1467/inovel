@@ -545,6 +545,8 @@ export async function listSourcesFiltered(
     kind?: string | null;
     status?: string | null;
     verifyStatus?: string | null;
+    /** 失败原因（timeout / http_403 / http_5xx …），见 VerifyFailReason */
+    failReason?: string | null;
   }
 ) {
   const rows = await listSources(db);
@@ -553,6 +555,7 @@ export async function listSourcesFiltered(
     if (filter?.kind && row.kind !== filter.kind) return false;
     if (filter?.status && row.status !== filter.status) return false;
     if (filter?.verifyStatus && row.verifyStatus !== filter.verifyStatus) return false;
+    if (filter?.failReason && row.verifyFailReason !== filter.failReason) return false;
     if (q) {
       const haystack = `${row.name} ${row.endpoint}`.toLowerCase();
       if (!haystack.includes(q)) return false;

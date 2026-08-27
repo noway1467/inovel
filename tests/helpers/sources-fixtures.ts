@@ -83,6 +83,7 @@ export function createSourceFixtures(raw: DatabaseSync) {
       last_search_at INTEGER,
       verify_status TEXT NOT NULL DEFAULT 'untested',
       verify_message TEXT,
+      verify_fail_reason TEXT,
       verified_at INTEGER,
       verify_search_hits INTEGER NOT NULL DEFAULT 0,
       verify_toc_chapters INTEGER NOT NULL DEFAULT 0,
