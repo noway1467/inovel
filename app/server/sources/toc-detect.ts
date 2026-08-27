@@ -28,6 +28,64 @@ const nextPageTexts = ["下一页", "下页", "下一頁", "next page", "next"];
 const nextChapterTexts = ["下一章", "下章", "下一節", "下一节", "next chapter"];
 
 /**
+ * 从地址里拆出「章节基名 + 页码」。
+ *
+ * 支持两种常见分页写法：
+ *  - 文件名后缀：`155832.html` / `155832_2.html` / `155832-2.html`
+ *  - 查询串：`?page=2` / `?p=2`
+ *
+ * 不带页码的算第 1 页，这样「首页 → 第 2 页」也能比出递增关系。
+ */
+function pageIndexOf(url: string): { base: string; index: number } | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+
+  // 基名统一去掉分页参数，这样「无参数的首页」和「?page=2」能比出同一个基名
+  const base = new URL(parsed.href);
+  let index: number | null = null;
+  for (const key of ["page", "p"]) {
+    const value = parsed.searchParams.get(key);
+    if (index === null && value && /^\d{1,4}$/.test(value)) index = Number(value);
+    base.searchParams.delete(key);
+  }
+  if (index !== null) return { base: base.href, index };
+
+  // 再看文件名后缀：`155832_2.html` / `155832-2.html`
+  const match = base.pathname.match(/^(.*?)(?:[_-](\d{1,4}))?(\.[a-z0-9]+)$/i);
+  if (match?.[1]) {
+    const [, stem, page, ext] = match;
+    base.pathname = `${stem}${ext}`;
+    return { base: base.href, index: page ? Number(page) : 1 };
+  }
+
+  // 既没有分页参数也没有可拆的文件名（`/read` 这类）：算第 1 页
+  return { base: base.href, index: 1 };
+}
+
+/**
+ * candidate 是不是 current 同一章的后续页。
+ *
+ * 为什么需要按地址判断：有一类站整章只有一个翻页按钮，文字始终写「下一章」，
+ * 由站点自己决定它指向下一页还是真的下一章 —— 也就是用户说的
+ * 「人家是有判断是否还有下一页」。只看文字必然把每章截成第一页。
+ *
+ * 地址能分出来：基名相同、页码递增就是同一章的续页
+ * （`155832.html` → `155832_2.html` → `155832_3.html`）；
+ * 基名一变就是真的章节边界（`155832_3.html` → `155833.html`）。
+ */
+export function isSameChapterNextPage(currentUrl: string, candidateUrl: string): boolean {
+  const current = pageIndexOf(currentUrl);
+  const candidate = pageIndexOf(candidateUrl);
+  if (!current || !candidate) return false;
+  if (current.base !== candidate.base) return false;
+  return candidate.index > current.index;
+}
+
+/**
  * 从页面里探测「下一页」地址。
  *
  * 用于书源没写 nextContentUrl、或那条规则需要 JS 求值的情况 ——
@@ -50,14 +108,29 @@ export function detectNextPageUrl(root: XmlNode, currentUrl: string): string | n
   };
   walk(root);
 
+  // 第一轮：按文字认。写明「下一页」的最可信，且要排除「下一章」——
+  // 两者文字相近，混淆会把两章拼成一章。
   for (const link of links) {
-    // 先排除「下一章」：它和「下一页」文字相近，混淆会把两章拼在一起
     if (nextChapterTexts.some((word) => link.text.includes(word))) continue;
     if (!nextPageTexts.some((word) => link.text.includes(word))) continue;
 
     const resolved = resolveUrl(currentUrl, link.href);
     if (resolved === currentUrl) continue;
     return resolved;
+  }
+
+  /**
+   * 第二轮：文字没写「下一页」时，按地址形状认。
+   *
+   * 有一类站（品书小说等）整章只有一个翻页按钮，文字恒为「下一章」，
+   * 指向下一页还是下一章由站点自己判断。第一轮会把这种链接全部丢掉，
+   * 于是每章只剩第一页。这里只认「基名相同、页码递增」的地址，
+   * 真正的章节边界（基名变了）仍然被挡在外面。
+   */
+  for (const link of links) {
+    const resolved = resolveUrl(currentUrl, link.href);
+    if (resolved === currentUrl) continue;
+    if (isSameChapterNextPage(currentUrl, resolved)) return resolved;
   }
   return null;
 }
