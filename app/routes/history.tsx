@@ -9,6 +9,8 @@ import { cloudflareContext } from "~/server/context";
 import { createDb } from "~/server/db";
 import { createAuth } from "~/server/auth";
 import { getBooksByIds } from "~/server/repositories/books";
+import { listRecentSourceBooks } from "~/server/services/source-reading";
+import { encodeSourceRef } from "~/lib/source-ref";
 import { readingHistory } from "drizzle/schema";
 import { desc, eq } from "drizzle-orm";
 
@@ -33,17 +35,34 @@ export async function loader({ request, context }: Route.LoaderArgs) {
     seen.add(row.bookId);
     return true;
   });
-  const bookMap = await getBooksByIds(
-    db,
-    dedupedRows.map((row) => row.bookId)
-  );
+  const [bookMap, sourceRows] = await Promise.all([
+    getBooksByIds(
+      db,
+      dedupedRows.map((row) => row.bookId)
+    ),
+    // 在线源读过的书同样算"最近阅读"，与本地书并列
+    listRecentSourceBooks(db, session.user.id).catch(() => []),
+  ]);
   const history = [];
   for (const row of dedupedRows) {
     const book = bookMap.get(row.bookId);
     if (!book) continue;
     history.push({ row, book });
   }
-  return { user: session.user, history };
+  return {
+    user: session.user,
+    history,
+    sourceHistory: sourceRows.map((row) => ({
+      sourceId: row.sourceId,
+      bookUrl: row.bookUrl,
+      bookTitle: row.bookTitle,
+      sourceName: row.sourceName,
+      lastChapterTitle: row.lastChapterTitle,
+      lastChapterKey: row.lastChapterKey,
+      lastChapterIndex: row.lastChapterIndex,
+      lastReadAt: row.lastReadAt?.toISOString() ?? null,
+    })),
+  };
 }
 
 export default function HistoryPage({ loaderData }: Route.ComponentProps) {
@@ -63,7 +82,9 @@ export default function HistoryPage({ loaderData }: Route.ComponentProps) {
     );
   }
 
-  if (loaderData.history.length === 0) {
+  const sourceHistory = loaderData.sourceHistory ?? [];
+
+  if (loaderData.history.length === 0 && sourceHistory.length === 0) {
     return (
       <div className="paper-panel mx-auto max-w-lg rounded-2xl p-4">
         <EmptyState title="还没有阅读历史" description="读过的章节会按时间显示。" />
@@ -79,27 +100,66 @@ export default function HistoryPage({ loaderData }: Route.ComponentProps) {
         </p>
         <h1 className="mt-2 font-serif text-2xl font-semibold">翻过的页，都留在这里</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          按最近阅读时间排列，共 {loaderData.history.length} 本。
+          按最近阅读时间排列，共 {loaderData.history.length + sourceHistory.length} 本。
         </p>
       </header>
-      <section className="paper-panel grid gap-1 rounded-2xl p-3 sm:p-4 md:grid-cols-2">
-        {loaderData.history.map(({ book, row }, i) => {
-          const summary: BookSummary = {
-            id: book.id,
-            title: book.title,
-            authorName: book.authorName,
-            categoryName: book.categoryName,
-            tags: book.tags,
-            status: book.status,
-            latestChapterTitle: book.latestChapterTitle,
-            wordCount: book.wordCount,
-            updatedAt: book.updatedAt?.toISOString() ?? null,
-            coverKey: book.coverKey,
-            progress: row.bookProgress,
-          };
-          return <BookListItem key={book.id} book={summary} seed={i} />;
-        })}
-      </section>
+      {loaderData.history.length > 0 && (
+        <section className="paper-panel grid gap-1 rounded-2xl p-3 sm:p-4 md:grid-cols-2">
+          {loaderData.history.map(({ book, row }, i) => {
+            const summary: BookSummary = {
+              id: book.id,
+              title: book.title,
+              authorName: book.authorName,
+              categoryName: book.categoryName,
+              tags: book.tags,
+              status: book.status,
+              latestChapterTitle: book.latestChapterTitle,
+              wordCount: book.wordCount,
+              updatedAt: book.updatedAt?.toISOString() ?? null,
+              coverKey: book.coverKey,
+              progress: row.bookProgress,
+            };
+            return <BookListItem key={book.id} book={summary} seed={i} />;
+          })}
+        </section>
+      )}
+
+      {/* 在线源读过的书：点进去直接回到上次那一章 */}
+      {sourceHistory.length > 0 && (
+        <section className="paper-panel rounded-2xl p-3 sm:p-4" aria-label="在线源阅读历史">
+          <h2 className="mb-2 text-sm font-semibold">在线源（{sourceHistory.length}）</h2>
+          <ul className="divide-y divide-border/60">
+            {sourceHistory.map((item) => (
+              <li key={`${item.sourceId}-${item.bookUrl}`}>
+                <Link
+                  to={
+                    item.lastChapterKey
+                      ? `/source/${item.sourceId}/chapter?key=${encodeSourceRef(
+                          item.lastChapterKey
+                        )}&title=${encodeURIComponent(item.bookTitle)}&book=${encodeSourceRef(
+                          item.bookUrl
+                        )}&i=${item.lastChapterIndex ?? 0}`
+                      : `/source/${item.sourceId}/book?url=${encodeSourceRef(
+                          item.bookUrl
+                        )}&title=${encodeURIComponent(item.bookTitle)}`
+                  }
+                  className="flex items-baseline gap-2 py-2 hover:bg-muted"
+                >
+                  <span className="min-w-0 truncate text-sm font-medium">{item.bookTitle}</span>
+                  {item.sourceName && (
+                    <span className="shrink-0 text-xs text-muted-foreground">
+                      {item.sourceName}
+                    </span>
+                  )}
+                  <span className="ml-auto shrink-0 truncate text-xs text-muted-foreground">
+                    {item.lastChapterTitle ?? ""}
+                  </span>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
     </div>
   );
 }

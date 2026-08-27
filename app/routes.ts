@@ -25,9 +25,14 @@ export default [
     route("admin/sources", "routes/admin-sources.tsx"),
     route("notifications", "routes/notifications.tsx"),
     route("source/:sourceId/book", "routes/source-book.tsx"),
-    route("source/:sourceId/chapter", "routes/source-chapter.tsx"),
   ]),
   route("read/:bookId/:chapterId", "routes/reader.tsx"),
+  /**
+   * 在线源阅读页不进 app-layout：那层有顶栏 + 底部导航 + 内边距，
+   * 会把正文可视高度砍掉一大截。与本地阅读器一样独占整屏，
+   * 上下栏由页面自己按需显隐。
+   */
+  route("source/:sourceId/chapter", "routes/source-chapter.tsx"),
   route("api/auth/*", "routes/api.auth.ts"),
   route("api/reader/progress", "routes/api.reader-progress.ts"),
   route("api/reader/preferences", "routes/api.reader-preferences.ts"),
@@ -38,6 +43,7 @@ export default [
   route("api/admin/site-settings", "routes/api.admin-site-settings.ts"),
   route("api/admin/sources/*", "routes/api.admin-sources.ts"),
   route("api/sources/search", "routes/api.sources-search.ts"),
+  route("api/sources/reading", "routes/api.source-reading.ts"),
   route("api/creator/chapters/:chapterId/*", "routes/api.creator-chapters.ts"),
   route("api/moderation/tasks/*", "routes/api.moderation.ts"),
   route("api/moderation/books/:bookId", "routes/api.moderation.ts", { id: "api.moderation-books" }),

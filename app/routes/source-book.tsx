@@ -1,5 +1,6 @@
+import { useState } from "react";
 import { Link } from "react-router";
-import { BookOpenText, RefreshCw } from "lucide-react";
+import { BookmarkCheck, BookmarkPlus, BookOpenText, Play, RefreshCw } from "lucide-react";
 import type { Route } from "./+types/source-book";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
@@ -9,6 +10,7 @@ import { cloudflareContext } from "~/server/context";
 import { createAuth } from "~/server/auth";
 import { createDb } from "~/server/db";
 import { getLiveToc } from "~/server/sources/live-read";
+import { getSourceReadingState } from "~/server/services/source-reading";
 import { loginRedirectTo } from "~/server/http/request-path";
 import { redirect } from "react-router";
 
@@ -30,12 +32,40 @@ export async function loader({ request, context, params }: Route.LoaderArgs) {
   const bookUrl = decodeSourceRef(url.searchParams.get("url") ?? "");
   const title = url.searchParams.get("title")?.trim() ?? "未命名";
   const sourceId = params.sourceId ?? "";
-  if (!bookUrl) return { error: "缺少书籍地址", title, sourceId, bookUrl: "", toc: null };
+  if (!bookUrl) {
+    return {
+      error: "缺少书籍地址",
+      title,
+      sourceId,
+      bookUrl: "",
+      toc: null,
+      inShelf: false,
+      lastRead: null,
+    };
+  }
 
   const db = createDb(env.DB_APP);
   try {
-    const toc = await getLiveToc(db, env.R2_CONTENT, sourceId, bookUrl);
-    return { error: null, title, sourceId, bookUrl, toc };
+    // 书架状态与上次读到哪一起取，用于「继续阅读」
+    const [toc, state] = await Promise.all([
+      getLiveToc(db, env.R2_CONTENT, sourceId, bookUrl),
+      getSourceReadingState(db, session.user.id, sourceId, bookUrl).catch(() => null),
+    ]);
+    return {
+      error: null,
+      title,
+      sourceId,
+      bookUrl,
+      toc,
+      inShelf: Boolean(state?.shelved),
+      lastRead: state?.lastChapterKey
+        ? {
+            chapterKey: state.lastChapterKey,
+            chapterTitle: state.lastChapterTitle,
+            chapterIndex: state.lastChapterIndex,
+          }
+        : null,
+    };
   } catch (error) {
     return {
       error: error instanceof Error ? error.message : "目录抓取失败",
@@ -43,12 +73,41 @@ export async function loader({ request, context, params }: Route.LoaderArgs) {
       sourceId,
       bookUrl,
       toc: null,
+      inShelf: false,
+      lastRead: null,
     };
   }
 }
 
 export default function SourceBookPage({ loaderData }: Route.ComponentProps) {
-  const { toc, title, error, sourceId, bookUrl } = loaderData;
+  const { toc, title, error, sourceId, bookUrl, lastRead } = loaderData;
+  const [inShelf, setInShelf] = useState(loaderData.inShelf);
+  const [shelfPending, setShelfPending] = useState(false);
+
+  async function toggleShelf() {
+    if (shelfPending) return;
+    setShelfPending(true);
+    const next = !inShelf;
+    try {
+      const response = await fetch("/api/sources/reading", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sourceId,
+          bookUrl,
+          bookTitle: title,
+          sourceName: toc?.sourceName ?? null,
+          chapterCount: toc?.chapters.length ?? null,
+          action: next ? "shelve" : "unshelve",
+        }),
+      });
+      if (response.ok) setInShelf(next);
+    } catch {
+      // 网络失败保持原状，不谎报成功
+    } finally {
+      setShelfPending(false);
+    }
+  }
 
   if (error || !toc) {
     return (
@@ -77,19 +136,46 @@ export default function SourceBookPage({ loaderData }: Route.ComponentProps) {
         </div>
         <p className="mt-1.5 text-xs text-muted-foreground">
           共 {toc.chapters.length} 章 · 内容来自在线源，点击章节即时抓取
+          {lastRead?.chapterTitle && ` · 上次读到《${lastRead.chapterTitle}》`}
         </p>
-        <div className="mt-3 flex gap-2">
-          {toc.chapters[0] && (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {/*
+            读过就从上次那章续读，没读过才从第一章开始 —— 与本地书的
+            「开始阅读」一致，不必让读者自己在目录里找位置。
+          */}
+          {(lastRead ?? toc.chapters[0]) && (
             <Button size="sm" asChild>
               <Link
                 to={`/source/${sourceId}/chapter?key=${encodeSourceRef(
-                  toc.chapters[0].key
-                )}&title=${encodeURIComponent(title)}&book=${encodeSourceRef(bookUrl)}&i=0`}
+                  lastRead?.chapterKey ?? toc.chapters[0]!.key
+                )}&title=${encodeURIComponent(title)}&book=${encodeSourceRef(bookUrl)}&i=${
+                  lastRead?.chapterIndex ?? 0
+                }`}
               >
-                从第一章开始
+                <Play className="size-4" />
+                {lastRead ? "继续阅读" : "开始阅读"}
               </Link>
             </Button>
           )}
+          <Button
+            size="sm"
+            variant={inShelf ? "secondary" : "outline"}
+            aria-pressed={inShelf}
+            disabled={shelfPending}
+            onClick={() => void toggleShelf()}
+          >
+            {inShelf ? (
+              <>
+                <BookmarkCheck className="size-4 text-primary" />
+                已在书架
+              </>
+            ) : (
+              <>
+                <BookmarkPlus className="size-4" />
+                加入书架
+              </>
+            )}
+          </Button>
           <Button size="sm" variant="secondary" asChild>
             <a href={bookUrl} target="_blank" rel="noopener noreferrer">
               查看源站页面

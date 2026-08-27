@@ -38,6 +38,8 @@ export interface GroupedBook {
   title: string;
   author: string | null;
   description: string | null;
+  /** 与关键字的相关度，见 keywordRelevance；客户端据此判断是否已精准命中 */
+  relevance: number;
   /** 可从哪些源订阅这本书 */
   options: { sourceId: string; sourceName: string; externalId: string }[];
 }
@@ -116,23 +118,37 @@ function normalizeForMatch(value: string): string {
 }
 
 /**
- * 结果是否真的匹配关键字。
+ * 关键字相关度分档。分数越高越"就是这本书"。
  *
  * 书源搜索页很少做严格匹配：不少站对任意关键字都回吐热门榜或整个分类页，
- * 于是搜「剑来」会混进几十本无关的书。这里按书名/作者做一次校验，
- * 把明显不相关的结果剔掉。
+ * 于是搜「剑来」会混进几十本无关的书。只给一个 true/false 不够用 ——
+ * 那样精确命中和"作者名里碰巧有这两个字"排在一起，用户要的书被埋在中间。
+ * 分档后由调用方决定怎么排、怎么算"搜到了"。
  *
- * 判定标准（满足其一）：
- *  - 书名或作者包含完整关键字
- *  - 关键字被拆成的每个字/词都出现在书名里（应对「剑 来」这类带空格输入）
+ *  4 书名与关键字完全一致（去标点空白后）
+ *  3 书名以关键字开头（《剑来》→《剑来传》这类续作、精校版）
+ *  2 书名包含关键字
+ *  1 只有作者命中，或多词输入被书名/作者拆开命中
+ *  0 不相关
  */
-export function matchesKeyword(book: { title: string; author?: string | null }, keyword: string): boolean {
+export const relevanceExact = 4;
+/** 达到这个分档才算"精准命中"，用于判断搜索是否可以停下来 */
+export const preciseRelevance = 3;
+
+export function keywordRelevance(
+  book: { title: string; author?: string | null },
+  keyword: string
+): number {
   const needle = normalizeForMatch(keyword);
-  if (!needle) return true;
+  if (!needle) return relevanceExact;
 
   const title = normalizeForMatch(book.title);
   const author = normalizeForMatch(book.author ?? "");
-  if (title.includes(needle) || (author && author.includes(needle))) return true;
+
+  if (title === needle) return 4;
+  if (title.startsWith(needle)) return 3;
+  if (title.includes(needle)) return 2;
+  if (author && author.includes(needle)) return 1;
 
   // 空格分词后逐词命中（书名里顺序可能与输入不同）
   const words = keyword
@@ -140,9 +156,17 @@ export function matchesKeyword(book: { title: string; author?: string | null }, 
     .map(normalizeForMatch)
     .filter((word) => word.length > 0);
   if (words.length > 1 && words.every((word) => title.includes(word) || author.includes(word))) {
-    return true;
+    return 1;
   }
-  return false;
+  return 0;
+}
+
+/** 是否值得留下来展示。相关度 > 0 即可，排序交给 keywordRelevance。 */
+export function matchesKeyword(
+  book: { title: string; author?: string | null },
+  keyword: string
+): boolean {
+  return keywordRelevance(book, keyword) > 0;
 }
 
 export interface AggregateSearchOptions {
@@ -260,13 +284,18 @@ export async function aggregateSearch(
         timeoutMs
       );
       /**
-       * 先按关键字过滤，再截断。
+       * 先按相关度过滤排序，再截断。
        *
        * 很多站对任意关键字都回吐热门榜或整个分类页 —— 不过滤的话
        * 搜一本书会混进几十本无关的，而且这些噪声会挤掉后面源的真实结果。
+       * 按相关度倒序后再截断，保证 perSourceLimit 留给最贴题的那几本，
+       * 而不是源站返回顺序里碰巧靠前的。
        */
-      const relevant = found.filter((book) => matchesKeyword(book, trimmed));
-      const capped = relevant.slice(0, perSourceLimit);
+      const relevant = found
+        .map((book) => ({ book, relevance: keywordRelevance(book, trimmed) }))
+        .filter((item) => item.relevance > 0)
+        .sort((a, b) => b.relevance - a.relevance);
+      const capped = relevant.slice(0, perSourceLimit).map((item) => item.book);
       for (const book of capped) {
         hits.push({ ...book, sourceId: source.id, sourceName: source.name });
       }
@@ -316,12 +345,16 @@ export async function aggregateSearch(
       title: hit.title,
       author: hit.author ?? null,
       description: hit.description ?? null,
+      relevance: keywordRelevance(hit, trimmed),
       options: [option],
     });
   }
 
-  // 多源命中的排前面：可选源越多越可能是真结果
-  const books = [...grouped.values()].sort((a, b) => b.options.length - a.options.length);
+  // 先按相关度：用户输入的那本书必须在最前面，而不是被"源多"的热门书顶掉。
+  // 同档内再比可选源数量 —— 多源命中更可能是真结果。
+  const books = [...grouped.values()].sort(
+    (a, b) => b.relevance - a.relevance || b.options.length - a.options.length
+  );
 
   // 记录各源的搜索健康度，影响下次的排序
   await recordSearchHealth(db, outcomes);

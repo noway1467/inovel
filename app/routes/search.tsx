@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Form, useSearchParams } from "react-router";
-import { Loader2, Search } from "lucide-react";
+import { Loader2, Pause, Play, Search } from "lucide-react";
 import type { Route } from "./+types/search";
 import { BookListItem } from "~/components/book/book-list-item";
 import type { BookSummary } from "~/components/book/book-card";
@@ -78,6 +78,8 @@ interface SourceBook {
   title: string;
   author: string | null;
   description: string | null;
+  /** 与关键字的相关度，见服务端 keywordRelevance */
+  relevance: number;
   options: SourceOption[];
 }
 
@@ -92,10 +94,16 @@ interface BatchResponse {
   error?: string;
 }
 
-/** 自动连查时，攒到这么多本就停，剩下的源留给用户按需展开 */
-const minAutoResults = 5;
-/** 自动连查的最大轮数，避免一次搜索把几百个源全打一遍 */
-const maxAutoRounds = 6;
+/**
+ * 停下来的条件：有一本"精准命中"的书攒够这么多个源。
+ *
+ * 判据是「同一本书有几个源」而不是「一共搜到几本」：用户要的是这一本，
+ * 多个源只是备用线路，够 5 条就不必再打剩下的源了。凑不够就一直往下查，
+ * 由用户手动暂停 —— 原先攒到 5 本任意书就停，常常那 5 本都不是想搜的。
+ */
+const enoughSourcesForOneBook = 5;
+/** 达到这个相关度才算精准命中，与服务端 preciseRelevance 对齐 */
+const preciseRelevance = 3;
 
 /**
  * 在线源结果，分批加载。
@@ -103,13 +111,54 @@ const maxAutoRounds = 6;
  * 每批只查 8 个源，边查边把结果并进列表。这样单个请求的出站数与
  * CPU 都有界，不会像原先那样一次打 250 个源直接触发 Error 1102。
  */
+/** 合并两批结果：同名同作者的书并到一条，各源作为可选项挂上去 */
+function mergeBooks(prev: SourceBook[], incoming: SourceBook[]): SourceBook[] {
+  const merged = new Map(prev.map((book) => [`${book.title}|${book.author ?? ""}`, book]));
+  for (const book of incoming) {
+    const key = `${book.title}|${book.author ?? ""}`;
+    const existing = merged.get(key);
+    if (!existing) {
+      merged.set(key, { ...book, options: [...book.options] });
+      continue;
+    }
+    const seen = new Set(
+      existing.options.map((option) => `${option.sourceId}|${option.externalId}`)
+    );
+    for (const option of book.options) {
+      const id = `${option.sourceId}|${option.externalId}`;
+      if (!seen.has(id)) existing.options.push(option);
+    }
+    if (!existing.description && book.description) existing.description = book.description;
+    existing.relevance = Math.max(existing.relevance, book.relevance);
+  }
+  // 与服务端同序：先相关度，再可选源数量
+  return [...merged.values()].sort(
+    (a, b) => b.relevance - a.relevance || b.options.length - a.options.length
+  );
+}
+
+/** 是否已经把用户要的那本书搜够了 */
+function hasEnough(books: SourceBook[]): boolean {
+  return books.some(
+    (book) => book.relevance >= preciseRelevance && book.options.length >= enoughSourcesForOneBook
+  );
+}
+
 function SourceResults({ query, sourceCount }: { query: string; sourceCount: number }) {
   const [books, setBooks] = useState<SourceBook[]>([]);
   const [queried, setQueried] = useState(0);
   const [okCount, setOkCount] = useState(0);
   const [nextOffset, setNextOffset] = useState<number | null>(0);
   const [loading, setLoading] = useState(false);
+  const [paused, setPaused] = useState(false);
+  const [done, setDone] = useState(false);
   const [error, setError] = useState("");
+
+  // 循环靠 ref 读取暂停状态与进度：state 要等重渲染才可见，循环里读不到
+  const pausedRef = useRef(false);
+  const offsetRef = useRef(0);
+  const booksRef = useRef<SourceBook[]>([]);
+  const runningRef = useRef(false);
 
   // 换关键词时重置，避免上一次的结果串到下一次
   useEffect(() => {
@@ -117,11 +166,16 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
     setQueried(0);
     setOkCount(0);
     setNextOffset(0);
+    setPaused(false);
+    setDone(false);
     setError("");
+    pausedRef.current = false;
+    offsetRef.current = 0;
+    booksRef.current = [];
   }, [query]);
 
   const loadBatch = useCallback(
-    async (offset: number): Promise<{ found: number; next: number | null } | null> => {
+    async (offset: number): Promise<{ next: number | null } | null> => {
       setLoading(true);
       setError("");
       try {
@@ -134,33 +188,14 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
           setNextOffset(null);
           return null;
         }
-        // 同名同作者的书合并各源，不重复列
-        setBooks((prev) => {
-          const merged = new Map(prev.map((book) => [`${book.title}|${book.author ?? ""}`, book]));
-          for (const incoming of data.books) {
-            const key = `${incoming.title}|${incoming.author ?? ""}`;
-            const existing = merged.get(key);
-            if (!existing) {
-              merged.set(key, incoming);
-              continue;
-            }
-            const seen = new Set(
-              existing.options.map((option) => `${option.sourceId}|${option.externalId}`)
-            );
-            for (const option of incoming.options) {
-              const id = `${option.sourceId}|${option.externalId}`;
-              if (!seen.has(id)) existing.options.push(option);
-            }
-            if (!existing.description && incoming.description) {
-              existing.description = incoming.description;
-            }
-          }
-          return [...merged.values()].sort((a, b) => b.options.length - a.options.length);
-        });
+        // 循环要立刻据此判断够不够，所以先算出合并结果再交给 state
+        const merged = mergeBooks(booksRef.current, data.books);
+        booksRef.current = merged;
+        setBooks(merged);
         setQueried((prev) => prev + data.totals.sourcesQueried);
         setOkCount((prev) => prev + data.totals.sourcesOk);
         setNextOffset(data.totals.nextOffset);
-        return { found: data.books.length, next: data.totals.nextOffset };
+        return { next: data.totals.nextOffset };
       } catch {
         setError("网络异常，稍后重试");
         setNextOffset(null);
@@ -173,39 +208,61 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
   );
 
   /**
-   * 自动往下查，直到攒够结果或源查完。
+   * 一直往下查，直到搜够、源查完、出错，或用户按暂停。
    *
-   * 原先只自动查第一批，没结果就要手动点「继续搜索」—— 而多数关键字
-   * 在前 8 个源里本来就搜不到，等于每次都得手点好几轮。
+   * 不再有轮数上限，也不需要用户点「继续搜索」—— 原先两者叠在一起：
+   * 多数关键字在前 8 个源里搜不到，自动查 6 轮就停手，剩下的全靠手点。
    *
-   * 停止条件取「够用」而非「查完」：攒到 minAutoResults 本就停，
-   * 剩下的源留给用户按需展开，避免为一次搜索把 250 个源全打一遍。
+   * 停止条件是「用户要的那本书攒够 5 个源」（见 hasEnough），
+   * 凑不够就继续打剩下的源，要停由用户自己决定。
    */
-  useEffect(() => {
-    if (!query || sourceCount === 0) return;
-    let cancelled = false;
-
-    const run = async () => {
-      let offset = 0;
-      let collected = 0;
-      let rounds = 0;
-
-      while (!cancelled && rounds < maxAutoRounds) {
-        rounds += 1;
+  const cancelledRef = useRef(false);
+  const runLoop = useCallback(async () => {
+    // 同一时刻只允许一个循环在跑，避免暂停/恢复连点跑出两条
+    if (runningRef.current) return;
+    runningRef.current = true;
+    try {
+      for (;;) {
+        if (cancelledRef.current || pausedRef.current) return;
+        const offset = offsetRef.current;
+        if (offset === null) return;
         const result = await loadBatch(offset);
         if (!result) return;
-        collected += result.found;
-        if (collected >= minAutoResults || result.next === null) return;
-        offset = result.next;
+        if (result.next === null) {
+          setDone(true);
+          return;
+        }
+        offsetRef.current = result.next;
+        if (hasEnough(booksRef.current)) {
+          setDone(true);
+          return;
+        }
       }
-    };
+    } finally {
+      runningRef.current = false;
+    }
+  }, [loadBatch]);
 
-    void run();
+  useEffect(() => {
+    if (!query || sourceCount === 0) return;
+    cancelledRef.current = false;
+    void runLoop();
     // 关键字变化或组件卸载时中止，避免上一次的轮询继续写状态
     return () => {
-      cancelled = true;
+      cancelledRef.current = true;
     };
-  }, [query, sourceCount, loadBatch]);
+  }, [query, sourceCount, runLoop]);
+
+  function togglePause() {
+    if (paused) {
+      setPaused(false);
+      pausedRef.current = false;
+      void runLoop();
+      return;
+    }
+    setPaused(true);
+    pausedRef.current = true;
+  }
 
   if (sourceCount === 0) {
     return (
@@ -218,46 +275,86 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
     );
   }
 
+  const running = loading || (!paused && !done && nextOffset !== null);
+
   return (
     <section>
-      <div className="mb-3 flex flex-wrap items-baseline gap-2">
+      {/* 一行装下标题、进度、状态和暂停按钮：加载图标只此一处 */}
+      <div className="mb-2 flex items-center gap-2">
         <h2 className="text-sm font-semibold">在线源</h2>
-        <span className="text-xs text-muted-foreground">
-          已查 {queried}/{sourceCount} 个源，{okCount} 个有结果
+        {running ? (
+          <Loader2 className="size-3.5 shrink-0 animate-spin text-muted-foreground" />
+        ) : null}
+        <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+          {queried}/{sourceCount} 个源 · {okCount} 个有结果 · {books.length} 本
+          {paused ? " · 已暂停" : done ? " · 已完成" : ""}
         </span>
-        {loading && <Loader2 className="size-3.5 animate-spin text-muted-foreground" />}
+        {nextOffset !== null && !done && (
+          <Button variant="ghost" size="sm" className="h-7 shrink-0 px-2" onClick={togglePause}>
+            {paused ? (
+              <>
+                <Play className="size-3.5" />
+                继续
+              </>
+            ) : (
+              <>
+                <Pause className="size-3.5" />
+                暂停
+              </>
+            )}
+          </Button>
+        )}
       </div>
+
+      {/* 进度条：比纯数字更直观地反映"还在查" */}
+      {sourceCount > 0 && (
+        <div className="mb-2 h-0.5 w-full overflow-hidden rounded-full bg-border">
+          <div
+            className="h-full bg-primary transition-[width] duration-300"
+            style={{ width: `${Math.min(100, Math.round((queried / sourceCount) * 100))}%` }}
+          />
+        </div>
+      )}
 
       {error && <p className="mb-2 text-sm text-danger">{error}</p>}
 
       {books.length === 0 && !loading && queried > 0 && (
         <p className="rounded-lg border border-border bg-surface px-3 py-2.5 text-sm text-muted-foreground">
-          已查的源里没有匹配结果{nextOffset !== null && "，可以继续搜索剩下的源"}。
+          {done ? "所有源都查过了，没有匹配结果。" : "已查的源里还没有匹配结果，正在继续查…"}
         </p>
       )}
 
       {books.length > 0 && (
-        <ul className="space-y-2">
+        <ul className="divide-y divide-border/60 overflow-hidden rounded-lg border border-border bg-surface">
           {books.map((book, i) => (
-            <li key={`${book.title}-${i}`} className="rounded-lg border border-border bg-surface p-3">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="font-medium">{book.title}</span>
+            <li key={`${book.title}-${i}`} className="px-3 py-2">
+              <div className="flex items-baseline gap-2">
+                <span className="min-w-0 truncate text-sm font-medium">{book.title}</span>
                 {book.author && (
-                  <span className="text-xs text-muted-foreground">{book.author}</span>
+                  <span className="shrink-0 text-xs text-muted-foreground">{book.author}</span>
                 )}
-                <Badge variant="secondary">{book.options.length} 个源</Badge>
+                {/* 精准命中标出来，用户一眼能分清哪条是自己要搜的 */}
+                {book.relevance >= preciseRelevance && (
+                  <Badge variant="success" className="shrink-0">
+                    精准
+                  </Badge>
+                )}
+                <span className="ml-auto shrink-0 text-xs text-muted-foreground">
+                  {book.options.length} 源
+                </span>
               </div>
               {book.description && (
-                <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
+                <p className="mt-0.5 line-clamp-1 text-xs text-muted-foreground">
                   {book.description}
                 </p>
               )}
-              <div className="mt-2 flex flex-wrap gap-1.5">
+              <div className="mt-1.5 flex flex-wrap gap-1">
                 {book.options.map((option) => (
                   <Button
                     key={`${option.sourceId}-${option.externalId}`}
                     size="sm"
                     variant="secondary"
+                    className="h-6 px-2 text-xs"
                     asChild
                   >
                     {/* 新标签页打开：搜索结果通常要挨个试几个源，
@@ -278,19 +375,6 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
           ))}
         </ul>
       )}
-
-      {nextOffset !== null && (
-        <Button
-          className="mt-3"
-          variant="secondary"
-          size="sm"
-          disabled={loading}
-          onClick={() => void loadBatch(nextOffset)}
-        >
-          {loading ? <Loader2 className="size-4 animate-spin" /> : null}
-          继续搜索剩下的 {sourceCount - queried} 个源
-        </Button>
-      )}
     </section>
   );
 }
@@ -301,21 +385,21 @@ export default function SearchPage({ loaderData }: Route.ComponentProps) {
   const hasQuery = Boolean(loaderData.query);
 
   return (
-    <div className="mx-auto max-w-4xl space-y-5">
+    <div className="mx-auto max-w-4xl space-y-3">
       <Form
         action="/search"
         role="search"
-        className="sticky top-12 z-30 bg-background py-2 md:top-14"
+        className="sticky top-12 z-30 bg-background py-1.5 md:top-14"
       >
         <div className="relative">
-          <Search className="pointer-events-none absolute left-3 top-1/2 size-5 -translate-y-1/2 text-muted-foreground" />
+          <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
           <Input
             name="q"
             defaultValue={query}
             placeholder="搜索书名、作者、标签"
             aria-label="搜索书名、作者、标签"
             autoFocus
-            className="h-12 pl-11 text-base"
+            className="h-10 pl-10"
           />
         </div>
       </Form>
@@ -355,17 +439,20 @@ export default function SearchPage({ loaderData }: Route.ComponentProps) {
           </section>
         </div>
       ) : (
-        <div className="space-y-6">
+        <div className="space-y-4">
           <section>
-            <p className="mb-3 text-sm text-muted-foreground">
-              本站书库：找到 {loaderData.results.length} 部
-            </p>
+            <div className="mb-2 flex items-center gap-2">
+              <h2 className="text-sm font-semibold">本站书库</h2>
+              <span className="text-xs text-muted-foreground">
+                找到 {loaderData.results.length} 部
+              </span>
+            </div>
             {loaderData.results.length === 0 ? (
               <p className="rounded-lg border border-border bg-surface px-3 py-2.5 text-sm text-muted-foreground">
                 本站书库没有匹配结果。
               </p>
             ) : (
-              <div className="grid gap-1 rounded-xl border border-border bg-surface p-2 md:grid-cols-2">
+              <div className="grid gap-0.5 rounded-lg border border-border bg-surface p-1.5 md:grid-cols-2">
                 {loaderData.results.map((book, i) => (
                   <BookListItem key={book.id} book={toSummary(book)} seed={i} />
                 ))}
