@@ -142,6 +142,13 @@ export interface GuardedFetchResult {
   truncated: boolean;
   /** Retry-After 头原值，429/503 重试时按它退避 */
   retryAfter?: string | null;
+  /**
+   * 响应里的 cookie（只取 name=value 部分）。
+   *
+   * 过浏览器验证时必须带回去：实测只带 challenge token 不带 cookie 会被
+   * 302 回挑战页 —— 服务端靠 session 认这次挑战。
+   */
+  setCookie?: string | null;
 }
 
 /**
@@ -171,6 +178,29 @@ const retryBackoffMs = 400;
  * Retry-After 头如果有就听它的（但封顶 2 秒，免得被源站要求等 60 秒
  * 把整个请求拖超时）。
  */
+/**
+ * 「正在验证浏览器」挑战页。
+ *
+ * 有一类站（ixdzs8 等）对章节页先回一个极小的页面：正文位置只有
+ * 「请稍等，正在进行安全验证…」，真地址靠一段 JS 跳到 `?challenge=<token>`。
+ * 我们不跑 JS，于是把这几行提示当成正文抓走 —— 表现就是"章节全是垃圾内容"，
+ * 而且不报错，看不出问题在哪。
+ *
+ * 但这个挑战不需要 JS 引擎：token 明写在 HTML 里，取出来带 cookie 重请求
+ * 一次即可。纯字符串与 HTTP 操作。
+ */
+const challengeTokenPattern = /(?:let|var|const)\s+token\s*=\s*["']([A-Za-z0-9+/=_-]{16,512})["']/;
+/** 挑战页都很小，用体积先做粗筛，避免对每个正常页面都跑正则 */
+const maxChallengeBytes = 4096;
+
+function extractChallengeToken(result: GuardedFetchResult): string | null {
+  if (result.body.length > maxChallengeBytes) return null;
+  // 必须同时具备"验证提示"和"跳 challenge 的脚本"，避免误判正常短页
+  if (!/challenge/i.test(result.body)) return null;
+  if (!/验证|verify|請稍等|请稍等/i.test(result.body)) return null;
+  return challengeTokenPattern.exec(result.body)?.[1] ?? null;
+}
+
 export async function guardedFetch(
   db: AppDb,
   raw: string,
@@ -188,6 +218,30 @@ export async function guardedFetch(
     await delay(wait);
     last = await guardedFetchOnce(db, raw, init);
   }
+
+  /**
+   * 过浏览器验证：拿到 token 后带上首次响应的 cookie 重请求一次。
+   *
+   * cookie 是必需的 —— 实测只带 token 不带 cookie 会被 302 回挑战页，
+   * 服务端要靠 session 认这次挑战。只尝试一次：真过不去就该如实失败，
+   * 反复重试只是白等。
+   */
+  if (last.ok) {
+    const token = extractChallengeToken(last.result);
+    if (token) {
+      const target = new URL(raw);
+      target.searchParams.set("challenge", token);
+      const retried = await guardedFetchOnce(db, target.toString(), {
+        headers: {
+          ...init?.headers,
+          ...(last.result.setCookie ? { Cookie: last.result.setCookie } : {}),
+        },
+      });
+      // 换来的内容不再是挑战页才采用，否则保留原结果让上层照常报错
+      if (retried.ok && !extractChallengeToken(retried.result)) return retried;
+    }
+  }
+
   return last;
 }
 
@@ -253,6 +307,7 @@ async function guardedFetchOnce(
         contentType,
         truncated,
         retryAfter: response.headers.get("retry-after"),
+        setCookie: pickCookiePairs(response.headers.get("set-cookie")),
       },
     };
   } catch (error) {
@@ -317,6 +372,25 @@ export function detectCharset(bytes: Uint8Array, contentType: string): string {
   if (fromMeta) return fromMeta;
 
   return "utf-8";
+}
+
+/**
+ * 从 Set-Cookie 里取出 `name=value` 拼成 Cookie 头的值。
+ *
+ * 只要键值，丢掉 Path/Expires/HttpOnly 那些属性 —— 那些是给浏览器存储用的，
+ * 回传时只需要键值对。多条 cookie 用 `; ` 连接。
+ */
+export function pickCookiePairs(setCookie: string | null): string | null {
+  if (!setCookie) return null;
+  /**
+   * 按逗号切要小心：Expires 里的日期本身含逗号（`Wed, 21 Oct 2025`）。
+   * 只在「逗号后面紧跟 name=」处切，日期里的逗号后面是空格加星期，不会误切。
+   */
+  const parts = setCookie.split(/,\s*(?=[^;=\s]+=)/);
+  const pairs = parts
+    .map((part) => part.split(";")[0]?.trim() ?? "")
+    .filter((pair) => pair.includes("=") && !/^(expires|path|domain|max-age|samesite)=/i.test(pair));
+  return pairs.length > 0 ? pairs.join("; ") : null;
 }
 
 /** 按嗅探到的编码解码；Workers 不认某个编码时退回 utf-8，不让整次抓取失败 */
