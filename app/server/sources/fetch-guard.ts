@@ -200,12 +200,13 @@ export async function guardedFetch(
       merged.set(chunk, offset);
       offset += chunk.byteLength;
     }
+    const contentType = response.headers.get("content-type") ?? "";
     return {
       ok: true,
       result: {
         status: response.status,
-        body: new TextDecoder("utf-8", { fatal: false }).decode(merged),
-        contentType: response.headers.get("content-type") ?? "",
+        body: decodeBody(merged, contentType),
+        contentType,
         truncated,
       },
     };
@@ -218,6 +219,68 @@ export async function guardedFetch(
     return { ok: false, code: "FETCH_FAILED", message };
   } finally {
     clearTimeout(timer);
+  }
+}
+
+/**
+ * 别名归一：gbk / gb2312 都用 gb18030 解。
+ *
+ * gb18030 是两者的超集，用它解码 gbk/gb2312 内容不会出错，还能顺带兜住
+ * 那些声明 gb2312 实际混入 gbk 生僻字的页面（中文小说站很常见）。
+ */
+const charsetAliases = new Map([
+  ["gbk", "gb18030"],
+  ["gb2312", "gb18030"],
+  ["gb-2312", "gb18030"],
+  ["x-gbk", "gb18030"],
+  ["gb18030", "gb18030"],
+  ["big5", "big5"],
+  ["big5-hkscs", "big5"],
+  ["shift_jis", "shift_jis"],
+  ["sjis", "shift_jis"],
+  ["euc-jp", "euc-jp"],
+  ["euc-kr", "euc-kr"],
+  ["utf-8", "utf-8"],
+  ["utf8", "utf-8"],
+]);
+
+function normalizeCharset(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  return charsetAliases.get(raw.trim().toLowerCase().replace(/^["']|["']$/g, "")) ?? null;
+}
+
+/**
+ * 嗅探响应编码。
+ *
+ * 为什么必须做：老一批中文小说站大量是 gbk，而我们原先写死 utf-8 解码，
+ * 整页会解成乱码（`�����Ķ�`）。表现很误导 —— 规则、分页都对，
+ * 选择器却一个也匹配不上，看起来像"规则失效"，实际是编码错了。
+ * 老版扁平格式的书源尤其集中在这批站上，光支持格式而不解编码等于没修。
+ *
+ * 顺序：先信 Content-Type 头，再看 HTML 里的 meta，最后按 utf-8。
+ * meta 那步先用 ascii 粗解前 2KB —— charset 声明本身一定是 ASCII，
+ * 所以哪怕正文是 gbk，也能可靠地把声明读出来。
+ */
+export function detectCharset(bytes: Uint8Array, contentType: string): string {
+  const fromHeader = normalizeCharset(/charset=([^;]+)/i.exec(contentType)?.[1]);
+  if (fromHeader) return fromHeader;
+
+  const head = new TextDecoder("ascii", { fatal: false }).decode(bytes.subarray(0, 2048));
+  const fromMeta =
+    normalizeCharset(/<meta[^>]+charset\s*=\s*["']?([\w-]+)/i.exec(head)?.[1]) ??
+    normalizeCharset(/content\s*=\s*["'][^"']*charset=([\w-]+)/i.exec(head)?.[1]);
+  if (fromMeta) return fromMeta;
+
+  return "utf-8";
+}
+
+/** 按嗅探到的编码解码；Workers 不认某个编码时退回 utf-8，不让整次抓取失败 */
+export function decodeBody(bytes: Uint8Array, contentType: string): string {
+  const charset = detectCharset(bytes, contentType);
+  try {
+    return new TextDecoder(charset, { fatal: false }).decode(bytes);
+  } catch {
+    return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
   }
 }
 

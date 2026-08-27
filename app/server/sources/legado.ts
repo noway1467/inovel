@@ -89,6 +89,82 @@ export interface LegadoBookSource {
   ruleContent?: LegadoContentRule;
 }
 
+/**
+ * 老版扁平格式的书源（`flyersoft: true` 那一代）。
+ *
+ * 规则不分组，全在顶层：`ruleBookContent` 而不是 `ruleContent.content`。
+ * 合集里这种格式占比极高 —— 实测某份 50 源的清单里 49 个是扁平、0 个是嵌套，
+ * 而我们只读嵌套，于是整份清单一个都进不来。这是"书源明明可用却被剔除"
+ * 的主要原因，跟规则本身能不能翻译无关：连规则都还没看就已经判空了。
+ */
+interface LegadoFlatSource {
+  ruleSearchUrl?: string;
+  ruleSearchList?: string;
+  ruleSearchName?: string;
+  ruleSearchAuthor?: string;
+  ruleSearchNoteUrl?: string;
+  ruleBookName?: string;
+  ruleBookAuthor?: string;
+  ruleIntroduce?: string;
+  ruleCoverUrl?: string;
+  /** 目录页地址（`{{$.}}list.html` 这类拼法），对应 ruleBookInfo.tocUrl */
+  ruleChapterUrl?: string;
+  ruleChapterList?: string;
+  ruleChapterName?: string;
+  /**
+   * 目录行里的章节链接（`a@href`），对应 ruleToc.chapterUrl。
+   *
+   * 名字和语义是反的：ruleContentUrl 不是正文地址，而是目录项指向的章节地址；
+   * 真正的目录页地址在 ruleChapterUrl。搞反会让每个源的目录全空，
+   * 所以这一对是照实际书源样本核对过的（ruleChapterList + ruleChapterName +
+   * ruleContentUrl 明显是"列表、章名、链接"一组）。
+   */
+  ruleContentUrl?: string;
+  ruleChapterUrlNext?: string;
+  ruleBookContent?: string;
+  ruleContentUrlNext?: string;
+}
+
+/** 仅在嵌套字段缺失时填入，嵌套格式的源完全不受影响 */
+function fillMissing<T extends object>(target: T, key: keyof T, value: string | null): void {
+  if (value === null) return;
+  if (clean(target[key] as unknown) !== null) return;
+  (target as Record<string, unknown>)[key as string] = value;
+}
+
+/**
+ * 扁平格式规范化成嵌套格式。
+ *
+ * 就地补齐 source 上缺失的嵌套字段，之后所有下游读取（ruleContent.content
+ * 等）无需再关心源用的是哪一代格式。两种格式并存时嵌套优先。
+ */
+export function normalizeFlatSource(raw: LegadoBookSource & LegadoFlatSource): void {
+  fillMissing(raw, "searchUrl", clean(raw.ruleSearchUrl));
+
+  const search = (raw.ruleSearch ??= {});
+  fillMissing(search, "bookList", clean(raw.ruleSearchList));
+  fillMissing(search, "name", clean(raw.ruleSearchName));
+  fillMissing(search, "author", clean(raw.ruleSearchAuthor));
+  fillMissing(search, "bookUrl", clean(raw.ruleSearchNoteUrl));
+
+  const info = (raw.ruleBookInfo ??= {});
+  fillMissing(info, "name", clean(raw.ruleBookName));
+  fillMissing(info, "author", clean(raw.ruleBookAuthor));
+  fillMissing(info, "intro", clean(raw.ruleIntroduce));
+  fillMissing(info, "coverUrl", clean(raw.ruleCoverUrl));
+  fillMissing(info, "tocUrl", clean(raw.ruleChapterUrl));
+
+  const toc = (raw.ruleToc ??= {});
+  fillMissing(toc, "chapterList", clean(raw.ruleChapterList));
+  fillMissing(toc, "chapterName", clean(raw.ruleChapterName));
+  fillMissing(toc, "chapterUrl", clean(raw.ruleContentUrl));
+  fillMissing(toc, "nextTocUrl", clean(raw.ruleChapterUrlNext));
+
+  const content = (raw.ruleContent ??= {});
+  fillMissing(content, "content", clean(raw.ruleBookContent));
+  fillMissing(content, "nextContentUrl", clean(raw.ruleContentUrlNext));
+}
+
 export interface ConversionResult {
   name: string;
   endpoint: string;
@@ -229,6 +305,8 @@ export function convertLegadoSource(raw: unknown): ConversionResult {
     throw new LegadoConversionError("不是合法的书源对象");
   }
   const source = raw as LegadoBookSource;
+  // 老版扁平格式先摊平成嵌套，后面的读取就不用管是哪一代格式了
+  normalizeFlatSource(source);
   const name = clean(source.bookSourceName);
   const endpoint = clean(source.bookSourceUrl);
   if (!name) throw new LegadoConversionError("缺少 bookSourceName");
