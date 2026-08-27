@@ -235,7 +235,16 @@ export async function createSource(db: AppDb, input: CreateSourceInput) {
    */
   if (input.kind === "rules") {
     const config = input.config ?? {};
-    const missing = ["tocList", "tocName", "tocUrl", "contentRule"].filter(
+    /**
+     * 目录走探测的源不带 tocList/tocName/tocUrl，这是合法状态而非残缺 ——
+     * 目录规则整段是 JS 的源就靠它才能装进来。正文规则仍是硬要求：
+     * 没有它连一章都读不出来。
+     */
+    const required =
+      config.tocMode === "detect"
+        ? ["contentRule"]
+        : ["tocList", "tocName", "tocUrl", "contentRule"];
+    const missing = required.filter(
       (key) => typeof config[key] !== "string" || !(config[key] as string).trim()
     );
     if (missing.length > 0) {

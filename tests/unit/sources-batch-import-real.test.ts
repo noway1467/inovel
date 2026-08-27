@@ -61,8 +61,12 @@ describe.skipIf(!existsSync(bookListPath))("真实书源合集：完整导入路
     });
 
     expect(result.format).toBe("bookSource");
-    // 实测基线：600 条里 209 条可导入
-    expect(result.totals.created).toBeGreaterThan(150);
+    /**
+     * 实测基线：600 条里 244 条可导入（此前 209）。
+     * 增量来自两处：正文规则含 JS 但内层是 CSS 的被抢救回来，
+     * 目录规则整段是 JS 的转为探测模式而不再整源剔除。
+     */
+    expect(result.totals.created).toBeGreaterThan(230);
     expect(result.finalUrl).toBe("https://cdn.example.net/gh/repo/file.json");
     expect(result.bytes).toBeGreaterThan(1_000_000);
 
@@ -81,6 +85,29 @@ describe.skipIf(!existsSync(bookListPath))("真实书源合集：完整导入路
     expect(result.totals.usable).toBe(result.totals.created + result.totals.reused);
     const rows = await db.select().from(contentSources).all();
     expect(rows).toHaveLength(result.totals.created);
+  });
+
+  /**
+   * 降级要分类计数。
+   *
+   * 管理台此前把所有降级一律显示成"不支持搜索"，而现在降级有两类：
+   * 搜索被禁、目录转探测。混在一起报会让运营方以为源只是不能搜。
+   */
+  it("降级分类计数，且只统计真正入库的源", async () => {
+    const body = readFileSync(bookListPath, "utf8");
+    stubFetchWith(body, "https://cdn.example.net/x.json");
+    const result = await batchImportSources(db, {
+      url: "https://list.example.org/x.json",
+      actorId: "u1",
+    });
+
+    expect(result.totals.tocDetected).toBeGreaterThan(0);
+    expect(result.totals.searchDisabled).toBeGreaterThan(0);
+    // 两类计数都不该超过入库总数
+    expect(result.totals.tocDetected).toBeLessThanOrEqual(result.totals.usable);
+    expect(result.totals.searchDisabled).toBeLessThanOrEqual(result.totals.usable);
+    // 探测是兜底，不该成为主路径
+    expect(result.totals.tocDetected).toBeLessThan(result.totals.created / 2);
   });
 
   it("重复导入同一清单不堆重复源", async () => {

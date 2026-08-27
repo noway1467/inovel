@@ -62,6 +62,200 @@ export function detectNextPageUrl(root: XmlNode, currentUrl: string): string | n
   return null;
 }
 
+/**
+ * base64 解码。Workers 与 Node 都有全局 atob。
+ *
+ * 章节地址是纯 ASCII 路径，用不上 UTF-8 还原；解不开就返回 null，
+ * 由调用方当作「这不是 base64」处理。
+ */
+function decodeBase64(value: string): string | null {
+  // 先排除明显不是的：长度不合法、含非 base64 字符
+  if (value.length < 8 || value.length % 4 !== 0) return null;
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(value)) return null;
+  try {
+    const decoded = atob(value);
+    // 解出来必须是可打印 ASCII，否则只是碰巧符合字符集的随机串
+    return /^[\x20-\x7e]+$/.test(decoded) ? decoded : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 解出来的串像不像章节地址 */
+function looksLikePath(value: string): boolean {
+  if (!/\d/.test(value)) return false;
+  return /^(?:https?:\/\/|\/)/.test(value) || /\.html?(?:$|[?#])/i.test(value);
+}
+
+/**
+ * 探测「地址被混淆」的目录。
+ *
+ * 有一类聚合站刻意不让爬：目录页每个 <a href> 都指向书籍首页（诱饵），
+ * 真地址 base64 编码后塞在随机命名的 data-* 里（`data-co4af27b="L2Jvb2sv…"`），
+ * 章节名也在 data-* 里，DOM 顺序还是打乱的、真顺序由另一个数字 data-* 给出。
+ *
+ * 这种页面上面的 detectChapterList 会全军覆没：所有 href 相同，去重后
+ * 只剩一章。但结构本身是规律的 —— 一组同类节点，每个都带「一个能解成
+ * 路径的 base64 属性」。按这个特征认，不需要 JS 引擎。
+ */
+export function detectObfuscatedChapters(root: XmlNode, pageUrl: string): DetectedChapter[] {
+  interface Row {
+    url: string;
+    title: string;
+    order: number;
+    domIndex: number;
+  }
+
+  /** 同一组的判定：标签名 + class 组合一致 */
+  const groups = new Map<string, Row[]>();
+  let domIndex = 0;
+
+  /** 节点上最后一个纯数字 data-*。靠前的常是 DOM 序（data-id），真顺序在后面。 */
+  const orderOf = (node: XmlNode): number | null => {
+    let found: number | null = null;
+    for (const [key, value] of Object.entries(node.attrs)) {
+      if (!key.startsWith("data-") || !/^\d+$/.test(value)) continue;
+      found = Number.parseInt(value, 10);
+    }
+    return found;
+  };
+
+  const walk = (node: XmlNode, ancestors: XmlNode[]) => {
+    for (const child of elementChildren(node)) {
+      let url: string | null = null;
+      let title = "";
+
+      for (const [key, value] of Object.entries(child.attrs)) {
+        if (!value) continue;
+        // 只看 data-*：href/class 那些是诱饵或样式
+        if (!key.startsWith("data-")) continue;
+        const decoded = decodeBase64(value);
+        if (decoded && looksLikePath(decoded)) {
+          if (!url) url = decoded;
+          continue;
+        }
+        if (/^\d+$/.test(value)) continue;
+        // 既不是 base64 也不是数字的 data-*，是章节名
+        if (!title && value.trim().length >= 2 && value.length <= 200) title = value.trim();
+      }
+
+      if (url) {
+        /**
+         * 真顺序常写在外层 <li> 上，而地址在里层 <a> 上，所以要往上找。
+         * 就近优先：自己有就用自己的，没有再逐级向上。
+         */
+        let order = orderOf(child);
+        for (let i = ancestors.length - 1; order === null && i >= 0; i -= 1) {
+          order = orderOf(ancestors[i]!);
+        }
+
+        /**
+         * 名字优先取 data-*，节点文本只作兜底 —— 与地址同理。
+         *
+         * 这类页面的可见文字是按 DOM 顺序写死的占位（「章节 01」「章节 02」…），
+         * 而 DOM 顺序是打乱的：排在首位的那条文字写着「章节 01」，真实序号却是 9。
+         * 直接用它，读者看到的章节编号会与阅读顺序互相矛盾。data-* 里才是
+         * 真名字（且带正确序号前缀），书源自己的 JS 也是先读 data-* 再退回文本。
+         */
+        const key = `${child.name}.${child.attrs.class ?? ""}`;
+        const list = groups.get(key) ?? [];
+        list.push({
+          url,
+          title: title || textOf(child).trim(),
+          order: order ?? domIndex,
+          domIndex,
+        });
+        groups.set(key, list);
+        domIndex += 1;
+      }
+      walk(child, [...ancestors, child]);
+    }
+  };
+  walk(root, []);
+
+  // 取最大的一组：目录是页面上这类节点最多的地方
+  let best: Row[] = [];
+  for (const rows of groups.values()) {
+    if (rows.length > best.length) best = rows;
+  }
+  if (best.length < 5) return [];
+
+  /**
+   * 按真顺序排。数字 data-* 缺失时退回 DOM 序；同序号时用 DOM 序稳定排序，
+   * 否则章节顺序在两次抓取间可能抖动，增量同步会重复插章。
+   */
+  const sorted = [...best].sort((a, b) =>
+    a.order === b.order ? a.domIndex - b.domIndex : a.order - b.order
+  );
+
+  const seen = new Set<string>();
+  const chapters: DetectedChapter[] = [];
+  for (const row of sorted) {
+    const url = resolveUrl(pageUrl, row.url);
+    if (seen.has(url)) continue;
+    seen.add(url);
+    chapters.push({ title: row.title || `第 ${chapters.length + 1} 章`, url });
+  }
+  return chapters;
+}
+
+/** 藏在属性里的目录地址，常见形态是 /redirect/..?u=<编码后的真地址> */
+function unwrapRedirect(raw: string): string {
+  const match = raw.match(/[?&]u=([^&]+)/);
+  if (!match?.[1]) return raw;
+  try {
+    const decoded = decodeURIComponent(match[1]);
+    return /^https?:\/\//i.test(decoded) ? decoded : raw;
+  } catch {
+    return raw;
+  }
+}
+
+/** 目录页链接的文字特征 */
+const tocLinkTexts = ["目录", "查看更多", "全部章节", "章节列表", "所有章节", "catalog"];
+
+/**
+ * 从详情页找目录页地址。
+ *
+ * 用于 infoTocUrl 规则需要 JS 求值、被降级丢掉的源：详情页上没有章节列表，
+ * 不跳这一步探测器只会在详情页上空转。聚合站还会把目录地址放在
+ * `data-cata` 这类属性里而不是 href，所以属性也要看。
+ *
+ * @param pageUrl 当前详情页地址，用于补全相对链接并排除自指
+ */
+export function detectTocPageUrl(root: XmlNode, pageUrl: string): string | null {
+  const attrCandidates: string[] = [];
+  const textCandidates: string[] = [];
+
+  const walk = (node: XmlNode) => {
+    for (const child of elementChildren(node)) {
+      for (const [key, value] of Object.entries(child.attrs)) {
+        if (!value || key === "href") continue;
+        // 属性名或值里带 catalog/目录 特征的，才是目录地址
+        const looksToc =
+          /cata|catalog|chapter|toc/i.test(key) || /catalog|\/chapter|mulu/i.test(value);
+        if (looksToc && /^(?:https?:\/\/|\/)/.test(value)) attrCandidates.push(value);
+      }
+      if (child.name === "a") {
+        const href = child.attrs.href ?? "";
+        const text = textOf(child).trim().toLowerCase();
+        if (href && !href.startsWith("#") && !href.startsWith("javascript:")) {
+          if (tocLinkTexts.some((word) => text.includes(word))) textCandidates.push(href);
+        }
+      }
+      walk(child);
+    }
+  };
+  walk(root);
+
+  // 属性优先：聚合站的 href 往往是详情页诱饵，data-* 才指向真目录
+  for (const raw of [...attrCandidates, ...textCandidates]) {
+    const resolved = resolveUrl(pageUrl, unwrapRedirect(raw));
+    if (resolved !== pageUrl) return resolved;
+  }
+  return null;
+}
+
 /** 链接文字像章节名的模式，命中越多越可能是目录 */
 const chapterTitlePatterns = [
   /第\s*[\d一二三四五六七八九十百千零〇]+\s*[章节回话卷篇]/,

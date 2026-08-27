@@ -1,7 +1,8 @@
 import { delay, guardedFetch, politeDelayMs } from "~/server/sources/fetch-guard";
 import { parseHtml } from "~/server/sources/html";
-import { buildSearchUrl, type RulesConfig } from "~/server/sources/legado";
+import { buildSearchUrl, degradeJsRule, type RulesConfig } from "~/server/sources/legado";
 import {
+  canParseRule,
   evalRuleAll,
   evalRuleNodes,
   evalRuleOne,
@@ -17,7 +18,12 @@ import {
   type SourceChapter,
 } from "~/server/sources/types";
 import { blockTextOf } from "~/server/sources/xml";
-import { detectChapterList, detectNextPageUrl } from "~/server/sources/toc-detect";
+import {
+  detectChapterList,
+  detectNextPageUrl,
+  detectObfuscatedChapters,
+  detectTocPageUrl,
+} from "~/server/sources/toc-detect";
 
 /**
  * 通用 CSS 规则引擎适配器，消费 legado.ts 转换出的 RulesConfig。
@@ -32,6 +38,12 @@ import { detectChapterList, detectNextPageUrl } from "~/server/sources/toc-detec
  */
 const maxTocPages = 30;
 const maxContentPages = 20;
+
+/**
+ * 探测结果达到这个数才认为「这页就是目录」，否则再去找目录页。
+ * 与 toc-detect 里认定目录容器的最小链接数一致。
+ */
+const minDetectedChapters = 5;
 
 /**
  * 求下一页地址。
@@ -69,22 +81,99 @@ async function detectFromPage(
 ): Promise<SourceChapter[]> {
   const doc = await loadDoc(ctx, pageUrl);
   if (doc.kind !== "html") return [];
-  return detectChapterList(doc.node, pageUrl).map((item) => ({
-    externalKey: item.url,
-    title: item.title,
-  }));
+  return detectOnDoc(doc, pageUrl);
+}
+
+/**
+ * 在一页上试两种探测，取章节多的那个。
+ *
+ * 不能"普通探测有结果就用它"：混淆目录页上普通探测并非颗粒无收，而是
+ * 认出「封面/正序/翻页」这类导航链接 —— 有六七条，看着像成功，实则全是
+ * 废条目。按数量仲裁才能让真目录（十条起）胜出。同分给普通探测，
+ * 它覆盖绝大多数站。
+ */
+function detectOnDoc(doc: RuleDoc, pageUrl: string): SourceChapter[] {
+  if (doc.kind !== "html") return [];
+  const plain = detectChapterList(doc.node, pageUrl);
+  const obfuscated = detectObfuscatedChapters(doc.node, pageUrl);
+  const winner = obfuscated.length > plain.length ? obfuscated : plain;
+  return winner.map((item) => ({ externalKey: item.url, title: item.title }));
+}
+
+/**
+ * 探测目录：先在当前页找，找不到就跳一次目录页再找。
+ *
+ * 那一跳是必要的：详情页上本来就没有章节列表，而 infoTocUrl 规则
+ * 需要 JS 求值的源（聚合站几乎都是）已经把该规则降级丢掉了，
+ * 不跳就只能在详情页上空转。
+ */
+async function detectWithTocHop(
+  ctx: Parameters<SourceAdapter["listChapters"]>[0],
+  pageUrl: string
+): Promise<SourceChapter[]> {
+  const doc = await loadDoc(ctx, pageUrl);
+  const here = detectOnDoc(doc, pageUrl);
+  /**
+   * 结果够厚就不必再跳。阈值取 5，与探测器认定「这是个目录容器」的
+   * 最小链接数一致：详情页上认出的三五条多是换源站点链接，不是章节。
+   */
+  if (here.length >= minDetectedChapters) return here;
+
+  if (doc.kind !== "html") return here;
+  const tocPage = detectTocPageUrl(doc.node, pageUrl);
+  if (!tocPage) return here;
+
+  await delay(politeDelayMs);
+  const hopped = await detectFromPage(ctx, tocPage);
+  return hopped.length > here.length ? hopped : here;
+}
+
+/**
+ * 读取时再降级一次含 JS 的规则。
+ *
+ * 导入时 legado.ts 已经降级过，这里重做是为了库里的老行：它们是在
+ * 支持降级之前入库的，规则里还带着 `@js:` 尾巴。不在这兜一次就得跑
+ * 数据迁移，而降级是纯函数、幂等，读取时做的代价可以忽略。
+ */
+function usableRule(raw: unknown): string | null {
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  if (canParseRule(raw)) return raw;
+  const degraded = degradeJsRule(raw);
+  /**
+   * 降不下来就返回 null，不能把原值透传：透传的话 tocList 仍是真值，
+   * 下面会判成 rules 模式，然后在求值时抛「不支持 JS 规则」——
+   * 而这种源本可以走探测。null 才能让它正确落到 detect。
+   */
+  return degraded ? degraded.rule : null;
 }
 
 function readConfig(config: Record<string, unknown>): RulesConfig {
-  const tocList = typeof config.tocList === "string" ? config.tocList : "";
-  const tocName = typeof config.tocName === "string" ? config.tocName : "";
-  const tocUrl = typeof config.tocUrl === "string" ? config.tocUrl : "";
-  const contentRule = typeof config.contentRule === "string" ? config.contentRule : "";
-  if (!tocList || !tocName || !tocUrl || !contentRule) {
-    throw new Error("规则配置不完整：需要 tocList / tocName / tocUrl / contentRule");
+  const tocList = usableRule(config.tocList);
+  const tocName = usableRule(config.tocName);
+  const tocUrl = usableRule(config.tocUrl);
+  const contentRule = usableRule(config.contentRule);
+  if (!contentRule) {
+    // 正文规则没有探测兜底：没有它这个源一章都读不出来
+    const raw = typeof config.contentRule === "string" ? config.contentRule.trim() : "";
+    throw new Error(
+      raw
+        ? "正文规则需要 JS 求值且无法降级，该源读不出正文。请换用规则为 CSS 的源。"
+        : "规则配置不完整：需要 contentRule"
+    );
   }
+
+  /**
+   * 目录三件套缺任意一项就走探测。
+   *
+   * 只留一半是不能用的：有 tocList 没 tocUrl，取出来的章节没有地址。
+   * 显式标了 detect 的源同样走这条路。
+   */
+  const tocMode =
+    config.tocMode === "detect" || !tocList || !tocName || !tocUrl ? "detect" : "rules";
+
   return {
     ...(config as unknown as RulesConfig),
+    tocMode,
     tocList,
     tocName,
     tocUrl,
@@ -145,7 +234,8 @@ export const rulesAdapter: SourceAdapter = {
       const doc = await loadDoc(ctx, ctx.endpoint);
       // 首页通常不是目录页，能连通并解析出 HTML 就算基本可用
       const titleGuess = evalRuleOne(doc, "tag.title@text");
-      const tocProbe = evalRuleAll(doc, config.tocName).slice(0, 5);
+      // 目录走探测的源没有 tocName 可探，连通性判断只看页面能否解析
+      const tocProbe = config.tocName ? evalRuleAll(doc, config.tocName).slice(0, 5) : [];
       return {
         ok: true,
         message: tocProbe.length
@@ -195,6 +285,23 @@ export const rulesAdapter: SourceAdapter = {
     const config = readConfig(ctx.config);
     const firstUrl = await resolveTocUrl(ctx, config, book.externalId);
 
+    /**
+     * 目录规则不可翻译的源（整段 JS）直接走探测，不必先跑一遍必定
+     * 落空的规则 —— 那会白花一次请求，还会把真实原因盖成"规则未命中"。
+     */
+    if (config.tocMode === "detect") {
+      const detected = await detectWithTocHop(ctx, firstUrl);
+      if (detected.length > 0) return detected;
+      throw new Error(
+        "该源目录规则需要 JS 求值，已改用页面结构探测，但这本书的目录页没探测到章节列表。"
+      );
+    }
+
+    // tocMode === "rules" 时 readConfig 已保证三者非空
+    const tocListRule = config.tocList!;
+    const tocNameRule = config.tocName!;
+    const tocUrlRule = config.tocUrl!;
+
     const chapters: SourceChapter[] = [];
     const seen = new Set<string>();
     // 访问过的页面地址，防止分页规则自指导致死循环
@@ -208,9 +315,9 @@ export const rulesAdapter: SourceAdapter = {
       pages += 1;
 
       const doc = await loadDoc(ctx, pageUrl);
-      for (const item of evalRuleNodes(doc, config.tocList)) {
-        const title = evalRuleOne(item, config.tocName);
-        const href = evalRuleOne(item, config.tocUrl);
+      for (const item of evalRuleNodes(doc, tocListRule)) {
+        const title = evalRuleOne(item, tocNameRule);
+        const href = evalRuleOne(item, tocUrlRule);
         if (!title || !href) continue;
         const externalKey = resolveUrl(pageUrl, href);
         // 目录页常有"最新章节"重复块，按地址去重
@@ -243,7 +350,7 @@ export const rulesAdapter: SourceAdapter = {
      * 是简介碎片，会得到一堆点开就报错的假章节。探测真实目录才有意义：
      * 找到的是带真实地址的章节，正文照常能回源抓。
      */
-    const detected = await detectFromPage(ctx, firstUrl);
+    const detected = await detectWithTocHop(ctx, firstUrl);
     if (detected.length > 0) return detected;
 
     throw new Error(
@@ -271,7 +378,14 @@ export const rulesAdapter: SourceAdapter = {
       pages += 1;
 
       const doc = await loadDoc(ctx, pageUrl);
-      const parsed = evalRuleOne(doc, config.contentRule).trim();
+      /**
+       * 用 evalRuleAll 而非 evalRuleOne：正文规则的选择器常命中一整组节点
+       * （`.mrx-cot@p@html`、`.content p@text` 这类），取第一个等于只拿到
+       * 首段，整章正文被截断。evalRuleAll 取首个有结果分支的全部命中，
+       * 拼起来才是完整正文；命中单个容器的规则（`id.content@html`）
+       * 结果不变。
+       */
+      const parsed = evalRuleAll(doc, config.contentRule).join("\n").trim();
       if (parsed) {
         // 正文规则多为 @html/@content，取出来的是 HTML 片段，需再解析分段；
         // 若已是纯文本，parseHtml 也能安全处理

@@ -27,9 +27,20 @@ export interface BatchImportResult {
    * 逐条列出跳过原因对使用者没有价值 —— 那些源本来就不可能工作。
    */
   droppedCount: number;
-  /** 转换成功但有降级的源（多为搜索需 JS，目录正文仍可用） */
+  /** 转换成功但有降级的源（搜索需 JS、目录转探测等，正文仍可用） */
   warned: { name: string; warnings: string[] }[];
-  totals: { usable: number; created: number; reused: number; dropped: number };
+  totals: {
+    usable: number;
+    created: number;
+    reused: number;
+    dropped: number;
+    /**
+     * 降级细分。管理台此前把所有 warned 一律显示成"不支持搜索"，
+     * 现在降级有多种（目录转探测也算），笼统一句话会误导运营方。
+     */
+    searchDisabled: number;
+    tocDetected: number;
+  };
 }
 
 async function findByEndpoint(db: AppDb, endpoint: string) {
@@ -46,6 +57,15 @@ interface PendingSource {
   /** 书源自带 weight，作为搜索排序的初始优先级 */
   weight: number;
   warnings: string[];
+}
+
+/** 从待建源的配置里读降级情况，用于给运营方分类统计 */
+function degradeKind(item: PendingSource) {
+  const config = item.config ?? {};
+  return {
+    searchDisabled: item.kind === "rules" && !config.searchUrl,
+    tocDetected: config.tocMode === "detect",
+  };
 }
 
 /** 两种格式各自转换后，收敛成同一种待建列表 */
@@ -123,13 +143,23 @@ export async function batchImportSources(
   // 转换阶段就用不了的源，连同建源失败的一起计入丢弃
   let dropped = droppedAtConvert;
 
+  let searchDisabled = 0;
+  let tocDetected = 0;
+
   for (const item of pending) {
     if (item.warnings.length > 0) warned.push({ name: item.name, warnings: item.warnings });
+    // 只统计真正进了库的：建不起来的源计入丢弃，不该再出现在降级提示里
+    const countDegrade = () => {
+      const kind = degradeKind(item);
+      if (kind.searchDisabled) searchDisabled += 1;
+      if (kind.tocDetected) tocDetected += 1;
+    };
     try {
       // 同地址的源复用，反复导入同一清单不会堆出重复行与重复同步计划
       const existing = await findByEndpoint(db, item.endpoint);
       if (existing) {
         reused.push({ name: item.name, sourceId: existing.id });
+        countDegrade();
         continue;
       }
       const result = await createSource(db, {
@@ -148,6 +178,7 @@ export async function batchImportSources(
         kind: item.kind,
         status: result.status,
       });
+      countDegrade();
     } catch {
       // 建不起来的源直接丢，不打断整批
       dropped += 1;
@@ -167,6 +198,8 @@ export async function batchImportSources(
       created: created.length,
       reused: reused.length,
       dropped,
+      searchDisabled,
+      tocDetected,
     },
   };
 }

@@ -31,6 +31,30 @@ const namedEntities: Record<string, string> = {
   quot: '"',
   apos: "'",
   nbsp: " ",
+  /**
+   * 零宽与方向标记。数值形式（&#8206;）本来就能解，命名形式不解就原样留在
+   * 文本里 —— 章节名会变成「摆烂爱豆&zwnj;被&zwj;操…」这种样子。
+   *
+   * 有的站专门往标题与正文里插这些不可见字符来干扰抓取和关键字匹配，
+   * 解成空串正好把它们清掉。
+   */
+  zwj: "",
+  zwnj: "",
+  lrm: "",
+  rlm: "",
+  shy: "",
+  // 常见排版实体，小说站正文里出现频率很高
+  emsp: " ",
+  ensp: " ",
+  thinsp: " ",
+  mdash: "—",
+  ndash: "–",
+  ldquo: "“",
+  rdquo: "”",
+  lsquo: "‘",
+  rsquo: "’",
+  hellip: "…",
+  middot: "·",
 };
 
 export function decodeXmlEntities(input: string): string {

@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { parseHtml } from "~/server/sources/html";
-import { detectChapterList } from "~/server/sources/toc-detect";
+import {
+  detectChapterList,
+  detectObfuscatedChapters,
+  detectTocPageUrl,
+} from "~/server/sources/toc-detect";
 
 /**
  * 通用目录探测：不依赖书源规则，从页面结构认出章节列表。
@@ -144,5 +148,133 @@ describe("detectChapterList", () => {
     for (const chapter of chapters) {
       expect(chapter.url).toMatch(/^https?:\/\//);
     }
+  });
+});
+
+/**
+ * 地址被混淆的目录。
+ *
+ * 有一类聚合站刻意不让爬：每个 <a href> 都指向书籍首页（诱饵），真地址
+ * base64 编码后塞在随机命名的 data-* 里，章节名也在 data-* 里，DOM 顺序
+ * 打乱、真顺序由另一个数字 data-* 给出。普通探测在这种页面上会因为所有
+ * href 相同而去重成一章。
+ */
+describe("detectObfuscatedChapters", () => {
+  const b64 = (value: string) => Buffer.from(value, "utf8").toString("base64");
+
+  /** 打乱 DOM 顺序，真顺序放在第二个数字 data-* 里 */
+  function obfuscatedToc(count: number) {
+    const rows = Array.from({ length: count }, (_, i) => {
+      const path = `/book/9527/${100000 + i}.html`;
+      return {
+        domIndex: i,
+        order: count - i, // 与 DOM 序相反，用来验证真的按 order 排
+        html:
+          `<li class="chapter-row" data-id="${i}" data-x9f2="${count - i}">` +
+          `<a href="/book/9527/" class="g" data-t7b1="${i + 1} 备用名" ` +
+          `data-u4ac="${b64(path)}">章节 ${String(i + 1).padStart(2, "0")}</a></li>`,
+        path,
+      };
+    });
+    return {
+      html: `<html><body><ul class="toc">${rows.map((r) => r.html).join("")}</ul></body></html>`,
+      rows,
+    };
+  }
+
+  it("从 base64 的 data-* 里解出真实章节地址", () => {
+    const { rows } = obfuscatedToc(10);
+    const chapters = detectObfuscatedChapters(parseHtml(obfuscatedToc(10).html), base);
+    expect(chapters).toHaveLength(10);
+    // href 是诱饵（全指向书籍首页），结果里不能出现它
+    for (const chapter of chapters) {
+      expect(chapter.url).not.toBe("https://novels.example.org/book/9527/");
+      expect(chapter.url).toMatch(/^https:\/\/novels\.example\.org\/book\/9527\/\d+\.html$/);
+    }
+    // 真顺序由数字 data-* 给出，与 DOM 顺序相反
+    expect(chapters[0]?.url).toContain(rows[rows.length - 1]!.path);
+  });
+
+  /**
+   * 章节名同样要取 data-*，不能用可见文字。
+   *
+   * 这类页面的可见文字按 DOM 顺序写死（「章节 01」「章节 02」…），而 DOM
+   * 顺序是打乱的 —— 排在首位那条写着「章节 01」，真实序号却是最后一个。
+   * 用可见文字，读者看到的编号会与阅读顺序互相矛盾。
+   */
+  it("章节名取 data-* 里的真名字，不用按 DOM 顺序写死的可见文字", () => {
+    const chapters = detectObfuscatedChapters(parseHtml(obfuscatedToc(8).html), base);
+    expect(chapters[0]?.title).toContain("备用名");
+    expect(chapters[0]?.title).not.toMatch(/^章节 /);
+  });
+
+  it("没有可用 data-* 名字时退回节点文本", () => {
+    const rows = Array.from(
+      { length: 6 },
+      (_, i) => `<li><a data-u="${b64(`/book/1/${i + 10}.html`)}">第${i + 1}章 标题</a></li>`
+    ).join("");
+    const chapters = detectObfuscatedChapters(parseHtml(`<ul>${rows}</ul>`), base);
+    expect(chapters).toHaveLength(6);
+    expect(chapters[0]?.title).toBe("第1章 标题");
+  });
+
+  it("普通目录页不会被误判（没有 base64 data-* 就不出结果）", () => {
+    const html = `<div class="listmain"><dl>${chapterLinks(12)}</dl></div>`;
+    expect(detectObfuscatedChapters(parseHtml(html), base)).toEqual([]);
+  });
+
+  it("行数太少不算目录，避免把零星装饰节点当章节", () => {
+    const html = `<ul><li><a data-u="${b64("/book/1/2.html")}">仅一条</a></li></ul>`;
+    expect(detectObfuscatedChapters(parseHtml(html), base)).toEqual([]);
+  });
+
+  it("解不开或解出来不像地址的 base64 不采纳", () => {
+    // 合法 base64 但解出来是普通文字，不是路径
+    const rows = Array.from(
+      { length: 8 },
+      () => `<li><a data-u="${b64("just some text here")}">x</a></li>`
+    ).join("");
+    expect(detectObfuscatedChapters(parseHtml(`<ul>${rows}</ul>`), base)).toEqual([]);
+  });
+
+  it("空页面与畸形 HTML 返回空数组，不抛错", () => {
+    expect(detectObfuscatedChapters(parseHtml(""), base)).toEqual([]);
+    expect(detectObfuscatedChapters(parseHtml("<li><a data-u=abc"), base)).toEqual([]);
+  });
+});
+
+/**
+ * 详情页 → 目录页那一跳。
+ *
+ * 需要它的场景：infoTocUrl 规则要 JS 求值而被降级丢掉。详情页上没有章节
+ * 列表，不跳这一步探测器只会在详情页空转。聚合站还把目录地址放在
+ * data-cata 这类属性里而不是 href。
+ */
+describe("detectTocPageUrl", () => {
+  it("从 data-cata 属性里取目录地址，并解开 ?u= 包装", () => {
+    const inner = "https://mirror.example.com/book/8899/catalog/";
+    const html =
+      `<html><body><li class="site">` +
+      `<a href="/redirect/309/1/?u=${encodeURIComponent("https://mirror.example.com/book/8899/")}">书名</a>` +
+      `<a href="/redirect/309/1/" data-cata="/redirect/309/1/?u=${encodeURIComponent(inner)}">来源站</a>` +
+      `</li></body></html>`;
+    expect(detectTocPageUrl(parseHtml(html), base)).toBe(inner);
+  });
+
+  it("退而认「目录」「查看更多」这类链接文字", () => {
+    const html = `<html><body><a href="/book/1/list.html">查看更多</a></body></html>`;
+    expect(detectTocPageUrl(parseHtml(html), base)).toBe(
+      "https://novels.example.org/book/1/list.html"
+    );
+  });
+
+  it("没有目录线索时返回 null，不乱猜", () => {
+    const html = `<html><body><a href="/">首页</a><a href="/rank">排行</a></body></html>`;
+    expect(detectTocPageUrl(parseHtml(html), base)).toBeNull();
+  });
+
+  it("指向自身的候选不采纳，避免原地打转", () => {
+    const html = `<html><body><a href="${base}">目录</a></body></html>`;
+    expect(detectTocPageUrl(parseHtml(html), base)).toBeNull();
   });
 });

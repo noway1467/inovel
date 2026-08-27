@@ -20,6 +20,22 @@ describe("decodeXmlEntities", () => {
   it("无法识别的实体原样保留，不吞字符", () => {
     expect(decodeXmlEntities("&unknownentity;")).toBe("&unknownentity;");
   });
+
+  /**
+   * 零宽与方向标记的命名形式必须也解。
+   *
+   * 有的站往标题和正文里插这些不可见字符干扰抓取，数值形式（&#8206;）本来
+   * 就能解，命名形式此前不解 —— 结果章节名里留着一串 `&zwj;` `&lrm;` 字面量。
+   */
+  it("零宽与方向标记解成空串，清掉反爬插入的不可见字符", () => {
+    expect(decodeXmlEntities("摆烂爱豆&zwnj;被&zwj;操&lrm;烂")).toBe("摆烂爱豆被操烂");
+    expect(decodeXmlEntities("a&shy;b&rlm;c")).toBe("abc");
+  });
+
+  it("常见排版实体解成对应字符", () => {
+    expect(decodeXmlEntities("第一章&hellip;&mdash;&ldquo;引&rdquo;")).toBe("第一章…—“引”");
+    expect(decodeXmlEntities("&emsp;缩进")).toBe(" 缩进");
+  });
 });
 
 describe("parseXml", () => {

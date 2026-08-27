@@ -3,6 +3,7 @@ import { Link } from "react-router";
 import {
   CloudDownload,
   Loader2,
+  Pause,
   Plus,
   RefreshCw,
   Search as SearchIcon,
@@ -633,12 +634,14 @@ interface VerifyOverview {
   ok: number;
   failed: number;
   untested: number;
+  /** 无法自动验证（搜索被降级掉的规则源），未下结论 */
+  skipped: number;
 }
 
 interface VerifyOutcome {
   sourceId: string;
   sourceName: string;
-  status: "ok" | "failed";
+  status: "ok" | "failed" | "skipped";
   searchHits: number;
   tocChapters: number;
   message: string;
@@ -646,7 +649,7 @@ interface VerifyOutcome {
 
 interface VerifyBatchResponse {
   outcomes: VerifyOutcome[];
-  totals: { checked: number; ok: number; failed: number; remaining: number };
+  totals: { checked: number; ok: number; failed: number; skipped: number; remaining: number };
   error?: string;
 }
 
@@ -668,7 +671,13 @@ function VerifyPanel({
   const [running, setRunning] = useState(false);
   const [keyword, setKeyword] = useState("第一");
   const [outcomes, setOutcomes] = useState<VerifyOutcome[]>([]);
-  const [progress, setProgress] = useState({ checked: 0, ok: 0, failed: 0, remaining: 0 });
+  const [progress, setProgress] = useState({
+    checked: 0,
+    ok: 0,
+    failed: 0,
+    skipped: 0,
+    remaining: 0,
+  });
   const [error, setError] = useState("");
   const stopRef = useRef(false);
 
@@ -677,7 +686,7 @@ function VerifyPanel({
     setRunning(true);
     setError("");
     setOutcomes([]);
-    setProgress({ checked: 0, ok: 0, failed: 0, remaining: 0 });
+    setProgress({ checked: 0, ok: 0, failed: 0, skipped: 0, remaining: 0 });
     stopRef.current = false;
 
     try {
@@ -698,6 +707,7 @@ function VerifyPanel({
           checked: prev.checked + data.totals.checked,
           ok: prev.ok + data.totals.ok,
           failed: prev.failed + data.totals.failed,
+          skipped: prev.skipped + (data.totals.skipped ?? 0),
           remaining: data.totals.remaining,
         }));
         // 没有待验证的源了
@@ -709,75 +719,120 @@ function VerifyPanel({
     }
   }
 
+  // 本轮总量用「已验 + 剩余」估算，用于画进度条
+  const totalThisRun = progress.checked + progress.remaining;
+  const percent =
+    totalThisRun > 0 ? Math.min(100, Math.round((progress.checked / totalThisRun) * 100)) : 0;
+  const okRate = progress.checked > 0 ? Math.round((progress.ok / progress.checked) * 100) : 0;
+
   return (
-    <section className="rounded-lg border border-border bg-surface p-4">
-      <h2 className="flex items-center gap-2 text-base font-semibold">
-        <ShieldCheck className="size-4" />
-        筛选可用源
-      </h2>
+    <section className="rounded-lg border border-border bg-surface p-3">
+      {/* 标题行直接带上总览计数，省掉单独一行 Badge */}
+      <div className="flex flex-wrap items-center gap-2">
+        <h2 className="flex items-center gap-1.5 text-sm font-semibold">
+          <ShieldCheck className="size-4" />
+          筛选可用源
+        </h2>
+        {overview && (
+          <div className="flex items-center gap-1.5 text-xs">
+            <Badge variant="success">可用 {overview.ok}</Badge>
+            <Badge variant="danger">不可用 {overview.failed}</Badge>
+            {/* 无法自动验证的源单列一格：它们不是坏源，不该被当成待清理 */}
+            {overview.skipped > 0 && (
+              <Badge variant="secondary" title="搜索需 JS 求值，无法自动验证；用详情页地址订阅即可">
+                待人工 {overview.skipped}
+              </Badge>
+            )}
+            <Badge variant="secondary">未测 {overview.untested}</Badge>
+          </div>
+        )}
+        <div className="ml-auto flex items-center gap-1.5">
+          <Input
+            aria-label="验证关键字"
+            title="验证关键字"
+            value={keyword}
+            onChange={(e) => setKeyword(e.target.value)}
+            className="h-8 w-24"
+          />
+          {running ? (
+            <Button size="sm" variant="secondary" onClick={() => (stopRef.current = true)}>
+              <Pause className="size-3.5" />
+              停止
+            </Button>
+          ) : (
+            <Button size="sm" disabled={busy} onClick={() => void runAll()}>
+              开始验证
+            </Button>
+          )}
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={running || busy || !overview?.failed}
+            onClick={async () => {
+              const response = await fetch("/api/admin/sources/purge-failed", { method: "POST" });
+              const data = (await response.json()) as { deleted?: number; error?: string };
+              if (!response.ok) {
+                setError(data.error ?? "清理失败");
+                return;
+              }
+              setError("");
+              await onDone();
+            }}
+          >
+            <Trash2 className="size-3.5" />
+            删除不可用（{overview?.failed ?? 0}）
+          </Button>
+        </div>
+      </div>
+
       <p className="mt-1 text-xs text-muted-foreground">
-        用一个常见关键字实际跑「搜索 → 取目录」，两步都成才算可用。
-        只测连通性分辨不出规则是否已失效，必须实跑。
+        用常见关键字实跑「搜索 → 取目录」，两步都成才算可用；只测连通性分辨不出规则是否已失效。
       </p>
 
-      {overview && (
-        <div className="mt-3 flex flex-wrap gap-2 text-sm">
-          <Badge variant="success">可用 {overview.ok}</Badge>
-          <Badge variant="danger">不可用 {overview.failed}</Badge>
-          <Badge variant="secondary">未测 {overview.untested}</Badge>
+      {/* 进度条 + 一行汇总，取代原来的纯文字进度 */}
+      {(running || progress.checked > 0) && (
+        <div className="mt-2">
+          <div className="h-1 w-full overflow-hidden rounded-full bg-border">
+            <div
+              className="h-full bg-primary transition-[width] duration-300"
+              style={{ width: `${percent}%` }}
+            />
+          </div>
+          <p className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
+            {running && <Loader2 className="size-3 animate-spin" />}
+            已验 {progress.checked}
+            {totalThisRun > progress.checked && `/${totalThisRun}`} · 可用 {progress.ok}（{okRate}
+            %） · 不可用 {progress.failed}
+            {progress.skipped > 0 && ` · 待人工 ${progress.skipped}`}
+            {progress.remaining > 0 && ` · 剩余 ${progress.remaining}`}
+          </p>
         </div>
       )}
-
-      <div className="mt-3 flex flex-wrap items-end gap-2">
-        <div className="w-40 space-y-1.5">
-          <Label htmlFor="vf-kw">验证关键字</Label>
-          <Input id="vf-kw" value={keyword} onChange={(e) => setKeyword(e.target.value)} />
-        </div>
-        <Button disabled={running || busy} onClick={() => void runAll()}>
-          {running && <Loader2 className="size-4 animate-spin" />}
-          {running ? "验证中…" : "开始验证"}
-        </Button>
-        {running && (
-          <Button variant="secondary" onClick={() => (stopRef.current = true)}>
-            停止
-          </Button>
-        )}
-        <Button
-          variant="ghost"
-          disabled={running || busy || !overview?.failed}
-          onClick={async () => {
-            const response = await fetch("/api/admin/sources/purge-failed", { method: "POST" });
-            const data = (await response.json()) as { deleted?: number; error?: string };
-            if (!response.ok) {
-              setError(data.error ?? "清理失败");
-              return;
-            }
-            setError("");
-            await onDone();
-          }}
-        >
-          <Trash2 className="size-4" />
-          删除不可用的（{overview?.failed ?? 0}）
-        </Button>
-      </div>
 
       {error && <p className="mt-2 text-sm text-danger">{error}</p>}
 
-      {progress.checked > 0 && (
-        <p className="mt-2 text-xs text-muted-foreground">
-          本次已验 {progress.checked} 个：可用 {progress.ok}，不可用 {progress.failed}
-          {progress.remaining > 0 && ` · 剩余未测 ${progress.remaining}`}
-        </p>
-      )}
-
+      {/* 结果分两列：可用的只列名字，不可用的带失败原因 */}
       {outcomes.length > 0 && (
-        <ul className="mt-2 max-h-64 space-y-0.5 overflow-y-auto text-xs">
+        <ul className="mt-2 max-h-56 divide-y divide-border/50 overflow-y-auto rounded border border-border/60 text-xs">
           {outcomes.map((outcome, i) => (
             <li
               key={`${outcome.sourceId}-${i}`}
-              className={outcome.status === "ok" ? "text-foreground" : "text-muted-foreground"}
+              className="flex items-baseline gap-1.5 px-2 py-1"
             >
-              {outcome.status === "ok" ? "✓" : "✗"} {outcome.sourceName}：{outcome.message}
+              {/* 三态各自的记号：跳过既不是通过也不是失败，用中性色 */}
+              <span
+                className={
+                  outcome.status === "ok"
+                    ? "shrink-0 text-success"
+                    : outcome.status === "skipped"
+                      ? "shrink-0 text-muted-foreground"
+                      : "shrink-0 text-danger"
+                }
+              >
+                {outcome.status === "ok" ? "✓" : outcome.status === "skipped" ? "–" : "✗"}
+              </span>
+              <span className="shrink-0 font-medium">{outcome.sourceName}</span>
+              <span className="min-w-0 truncate text-muted-foreground">{outcome.message}</span>
             </li>
           ))}
         </ul>
@@ -794,7 +849,14 @@ interface BatchImportResult {
   reused: { name: string }[];
   droppedCount: number;
   warned: { name: string; warnings: string[] }[];
-  totals: { usable: number; created: number; reused: number; dropped: number };
+  totals: {
+    usable: number;
+    created: number;
+    reused: number;
+    dropped: number;
+    searchDisabled: number;
+    tocDetected: number;
+  };
 }
 
 /** 从清单地址或粘贴的 JSON 批量导入；书源与订阅源自动判别 */
@@ -877,9 +939,15 @@ function UrlImportForm({
             {/* 用不了的源已丢弃：这些源本就不可能工作，逐条列原因没有价值 */}
             {result.totals.dropped > 0 && ` · 已自动剔除 ${result.totals.dropped} 个不可用的`}
           </p>
-          {result.warned.length > 0 && (
+          {/* 降级分开说：两种降级影响不同，笼统一句"不支持搜索"会误导 */}
+          {result.totals.searchDisabled > 0 && (
             <p className="text-xs text-muted-foreground">
-              {result.warned.length} 个源不支持搜索（其目录与正文仍可用）
+              {result.totals.searchDisabled} 个源不支持搜索（其目录与正文仍可用）
+            </p>
+          )}
+          {result.totals.tocDetected > 0 && (
+            <p className="text-xs text-muted-foreground">
+              {result.totals.tocDetected} 个源的目录规则需 JS 求值，已改为自动探测目录
             </p>
           )}
           {result.totals.usable > 0 && (

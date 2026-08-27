@@ -213,11 +213,28 @@ function parseSingle(input: string): SingleRule {
   return { selector, target, jsonPath: null, excludeIndexes: excludes };
 }
 
+/**
+ * 剥掉 Legado 列表规则的 `+` / `-` 前缀。
+ *
+ * 前缀表示「与上一条规则的结果合并/相减」，我们不实现合并语义 ——
+ * 但必须先剥掉再判别 JS，否则 `+@js:(function(){...})()` 会绕过下面的
+ * JS 判别，被当成选择器解析成一堆永不命中的碎片：源看着导入成功，
+ * 目录却永远是空的，且不报任何错。
+ */
+export function stripListPrefix(rule: string): string {
+  return rule.replace(/^\s*[+-]\s*/, "");
+}
+
 export function parseRule(raw: string): ParsedRule {
-  const input = (raw ?? "").trim();
+  const input = stripListPrefix((raw ?? "").trim());
   if (!input) throw new UnsupportedRuleError("规则为空");
 
-  if (input.includes("<js>") || input.startsWith("@js:") || input.includes("{{") ) {
+  /**
+   * `@js:` 出现在中段也不行（`class.x@html@js:(...)` 形态很常见）。
+   * 此前只判开头，中段的 JS 会被 `@` 拆进选择器 —— 同样是静默失效。
+   * 这类规则由 legado.ts 的 degradeJsRule 在导入/读取时降级掉。
+   */
+  if (input.includes("<js>") || /@js:/i.test(input) || input.includes("{{")) {
     throw new UnsupportedRuleError("不支持 JS 规则（<js> 或 {{}} 模板），请改用 CSS 或 JSONPath");
   }
   if (input.startsWith("//") || input.startsWith("@xpath:") || input.startsWith("@XPath:")) {

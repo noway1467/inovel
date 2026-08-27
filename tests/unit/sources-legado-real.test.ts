@@ -1,6 +1,11 @@
 import { existsSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { needsJsEvaluation, parseLegadoJson } from "~/server/sources/legado";
+import {
+  buildSearchUrl,
+  degradeJsRule,
+  needsJsEvaluation,
+  parseLegadoJson,
+} from "~/server/sources/legado";
 import { canParseRule } from "~/server/sources/rule-expr";
 
 interface RawSource {
@@ -60,12 +65,39 @@ describe.skipIf(!hasFixture)("真实书源合集转换率", () => {
     expect(withSearch / result.converted.length).toBeGreaterThan(0.7);
   });
 
-  it("转换成功的源，目录与正文规则一定可被引擎求值", () => {
+  /**
+   * 目录规则要么可求值，要么整组为空并标成 detect（交给页面结构探测）。
+   * 不允许"留一半"：有 tocList 没 tocUrl 的话章节没有可访问地址。
+   */
+  it("转换成功的源，目录规则可求值或明确标为探测", () => {
     for (const item of result.converted) {
-      expect(canParseRule(item.config.tocList)).toBe(true);
-      expect(canParseRule(item.config.tocName)).toBe(true);
-      expect(canParseRule(item.config.tocUrl)).toBe(true);
       expect(canParseRule(item.config.contentRule)).toBe(true);
+      if (item.config.tocMode === "detect") {
+        expect(item.config.tocList).toBeNull();
+        expect(item.config.tocName).toBeNull();
+        expect(item.config.tocUrl).toBeNull();
+        continue;
+      }
+      expect(canParseRule(item.config.tocList!)).toBe(true);
+      expect(canParseRule(item.config.tocName!)).toBe(true);
+      expect(canParseRule(item.config.tocUrl!)).toBe(true);
+    }
+  });
+
+  /**
+   * 填完关键字的搜索地址里不能残留 `{{}}` 占位。
+   *
+   * `{{page}}` 曾被漏掉：needsJsEvaluation 认它是纯文本占位而放行，
+   * buildSearchUrl 却不替换，于是地址里留着字面量 `{{page}}`，请求必然
+   * 404。合集里两成有搜索地址的源是这种写法，表现为"搜索永远失败"，
+   * 再被验证判失败清理掉 —— 症状看起来像"源不可用"，根因却在这一行。
+   */
+  it("搜索地址填完后不残留任何占位", () => {
+    const withSearch = result.converted.filter((c) => c.config.searchUrl);
+    expect(withSearch.length).toBeGreaterThan(100);
+    for (const item of withSearch) {
+      const built = buildSearchUrl(item.config.searchUrl!, "修仙");
+      expect(built, `残留占位：${built}`).not.toMatch(/\{\{|\}\}/);
     }
   });
 
@@ -112,6 +144,12 @@ describe.skipIf(!hasFixture)("真实书源合集转换率", () => {
           if (typeof rule !== "string") continue;
           // 需要 JS 求值的规则本就不在支持范围内，排除
           if (needsJsEvaluation(rule)) continue;
+          /**
+           * 带 JS 段的规则也排除：它们不直接过 parseRule，而是先经
+           * degradeJsRule 抢救出 CSS/JSONPath 部分（下一条用例专门测）。
+           * needsJsEvaluation 判的是地址模板，认不出中段的 `@js:`。
+           */
+          if (/@js:/i.test(rule) || rule.includes("<js>")) continue;
           if (predicate(rule)) found.push(rule);
         }
       }
@@ -126,5 +164,59 @@ describe.skipIf(!hasFixture)("真实书源合集转换率", () => {
     for (const rule of [...withOr, ...withBang]) {
       expect(canParseRule(rule), `无法解析：${rule}`).toBe(true);
     }
+  });
+
+  /**
+   * 带 JS 段的规则不能被"静默错解"。
+   *
+   * 此前 JS 判别只看规则开头，中段带 `@js:` 的会被拆进选择器（或整段当成
+   * JSONPath），parseRule 照样返回成功 —— 源导入成功、运行时永远空手而归，
+   * 且不报任何错。这是最难排查的一类失效，用真实合集守住。
+   */
+  it("中段带 @js: 的规则被识破，且能抢救出 CSS/JSONPath 头", () => {
+    const midJs: string[] = [];
+    for (const s of raw) {
+      const src = s as RawSource;
+      for (const rule of [src.ruleToc?.chapterList, src.ruleContent?.content]) {
+        if (typeof rule !== "string") continue;
+        if (rule.search(/@js:/i) > 0) midJs.push(rule);
+      }
+    }
+    expect(midJs.length).toBeGreaterThan(0);
+
+    for (const rule of midJs) {
+      // 不能被当成可直接求值的规则
+      expect(canParseRule(rule), `本应判为不可解析：${rule.slice(0, 60)}`).toBe(false);
+      // 但 JS 之前的部分应能抢救出来
+      const degraded = degradeJsRule(rule);
+      if (degraded) expect(canParseRule(degraded.rule)).toBe(true);
+    }
+  });
+
+  /**
+   * `+` / `-` 前缀的列表规则同样不能静默错解。
+   * `+@js:(...)` 此前绕过 JS 判别，被解析成一堆永不命中的选择器碎片。
+   */
+  it("+/- 前缀 + JS 的列表规则被识破", () => {
+    const prefixed: string[] = [];
+    for (const s of raw) {
+      const rule = (s as RawSource).ruleToc?.chapterList;
+      if (typeof rule !== "string") continue;
+      if (/^\s*[+-]/.test(rule) && /@js:|<js>/i.test(rule)) prefixed.push(rule);
+    }
+    for (const rule of prefixed) {
+      expect(canParseRule(rule), `本应判为不可解析：${rule.slice(0, 60)}`).toBe(false);
+    }
+  });
+
+  /**
+   * 转换成功的源里，走探测的那部分应当是少数。
+   *
+   * 探测是兜底而非常态：如果这个比例失控，说明规则翻译层退化了 ——
+   * 大量本可按规则取目录的源被降级成"猜"。
+   */
+  it("走探测的源只占少数，探测是兜底不是主路径", () => {
+    const detect = result.converted.filter((c) => c.config.tocMode === "detect").length;
+    expect(detect / result.converted.length).toBeLessThan(0.5);
   });
 });
