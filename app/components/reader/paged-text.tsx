@@ -146,7 +146,7 @@ export function PagedText({
       <div
         ref={contentRef}
         data-reader-pagination
-        className="h-full transition-transform duration-150"
+        className="reader-body h-full transition-transform duration-150"
         style={
           size.width > 0 && size.height > 0
             ? {

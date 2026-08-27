@@ -703,7 +703,7 @@ export default function ReaderPage({ loaderData }: Route.ComponentProps) {
             <div
               ref={paginationRef}
               data-reader-pagination
-              className="h-full"
+              className="reader-body h-full"
               style={{
                 ...bodyStyle,
                 height: "100%",
@@ -766,7 +766,7 @@ export default function ReaderPage({ loaderData }: Route.ComponentProps) {
           </>
         ) : (
           <article
-            className="mx-auto min-h-full max-w-[1360px]"
+            className="reader-body mx-auto min-h-full max-w-[1360px]"
             style={{
               ...bodyStyle,
               paddingLeft: scrollMarginPx[settings.margin],

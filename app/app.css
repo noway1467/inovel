@@ -139,3 +139,22 @@
   background: var(--reader-bg);
   color: var(--reader-fg);
 }
+
+/*
+  正文禁止选中。
+
+  起因：阅读器靠点击左右三分之一翻页，手机上稍微带一点拖动就变成选字，
+  弹出"复制"菜单挡住正文，翻页也失效了 —— 翻一页误触一次。
+
+  只作用于正文容器，标题栏、目录、设置面板照旧可选。
+  -webkit-touch-callout 是 iOS Safari 专有：长按弹出的那个系统菜单
+  不受 user-select 控制，得单独关。
+
+  这不是防拷贝手段，查看源码、开发者工具照样拿得到文字；
+  目的只是别让翻页手势变成选字。
+*/
+.reader-body {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
