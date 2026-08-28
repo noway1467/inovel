@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { parseHtml } from "~/server/sources/html";
-import { detectChapterList } from "~/server/sources/toc-detect";
+import { detectChapterList, stripLeadingDuplicates } from "~/server/sources/toc-detect";
 
 /**
  * 目录页上的「最新章节」预告块不该进目录。
@@ -98,6 +98,95 @@ describe("卷次重编号的书不按序号重排", () => {
     );
     expect(chapters[0]?.title).toBe("第1章 正文");
     expect(chapters.at(-1)?.title).toBe("第15章 最新");
+  });
+});
+
+describe("详情页顶上的「最新章节」预告不占第 1 条", () => {
+  /**
+   * 真实页面（35ge.info/147/147964/ 斗罗大陆）。上面那套按小标题分段的做法
+   * 在这页上不够用，页面有两处漏洞，都会把全书最后一章顶到目录第 1 条：
+   *
+   *  1. 信息栏一行 `<p>最新章节：<a>第二百三十六章 大结局（全书完）</a></p>`
+   *     —— 节点自身含链接，按「不含链接才算小标题」的判据认不出来
+   *  2. `<dl>` 里预告块 12 条 `<dd>` 与正文目录同标签同容器，tocList
+   *     选择器分不开
+   *
+   * 两者都排在正文之前，而按地址去重是首次出现胜出，于是正文末尾的同一章
+   * 被当成重复丢掉。用户看到的就是「点开书第一章是大结局」。
+   */
+  const teaser = readFileSync("tests/fixtures/jieqi-latest-teaser.html", "utf8");
+  const teaserBase = "http://www.35ge.info/147/147964/";
+  const chapters = detectChapterList(parseHtml(teaser), teaserBase);
+
+  it("第 1 条是引子，不是大结局", () => {
+    expect(chapters[0]?.title).toBe("引子 穿越的唐家三少");
+    expect(chapters[0]?.title).not.toContain("大结局");
+  });
+
+  it("大结局回到末尾", () => {
+    expect(chapters.at(-1)?.title).toContain("大结局");
+  });
+
+  it("预告块那几章仍在目录里，只是不在开头", () => {
+    // 剥离只丢重复入口，不能丢章节本身
+    const finale = chapters.filter((c) => c.url.endsWith("/52054833.html"));
+    expect(finale).toHaveLength(1);
+    const preview = chapters.find((c) => c.title.includes("新书《阴阳冕》预告"));
+    expect(preview).toBeDefined();
+  });
+
+  it("地址不重复", () => {
+    expect(new Set(chapters.map((c) => c.url)).size).toBe(chapters.length);
+  });
+});
+
+describe("stripLeadingDuplicates", () => {
+  const keyOf = (value: string) => value;
+
+  it("丢掉开头「后面还会再出现」的那一段", () => {
+    // c,b,a 是预告（倒序），后面 a..e 是正文
+    const input = ["c", "b", "a", "a", "b", "c", "d", "e"];
+    expect(stripLeadingDuplicates(input, keyOf)).toEqual(["a", "b", "c", "d", "e"]);
+  });
+
+  it("没有重复时原样返回", () => {
+    const input = ["a", "b", "c", "d", "e"];
+    expect(stripLeadingDuplicates(input, keyOf)).toEqual(input);
+  });
+
+  it("遇到第一条唯一条目就停，不继续往后扫", () => {
+    // b 唯一，扫到它就停 —— 后面的 d 重复不该被当成开头段
+    const input = ["a", "b", "d", "a", "d"];
+    expect(stripLeadingDuplicates(input, keyOf)).toEqual(["b", "d", "a", "d"]);
+  });
+
+  it("剩不下 3 条就不裁", () => {
+    /**
+     * 整页只有预告块、或目录被整份渲染两遍且很短时，「开头都是重复」这个
+     * 读法不成立。裁到空比留着重复条目糟得多 —— 那等于目录抓取失败。
+     */
+    expect(stripLeadingDuplicates(["a", "b", "a", "b"], keyOf)).toEqual(["a", "b", "a", "b"]);
+    expect(stripLeadingDuplicates(["a", "a"], keyOf)).toEqual(["a", "a"]);
+  });
+
+  it("空数组与单条不出错", () => {
+    expect(stripLeadingDuplicates([], keyOf)).toEqual([]);
+    expect(stripLeadingDuplicates(["a"], keyOf)).toEqual(["a"]);
+  });
+
+  it("按取键函数比较，不比对象身份", () => {
+    const items = [
+      { url: "/2.html", title: "第二章" },
+      { url: "/1.html", title: "第一章" },
+      { url: "/1.html", title: "第一章" },
+      { url: "/2.html", title: "第二章" },
+      { url: "/3.html", title: "第三章" },
+    ];
+    expect(stripLeadingDuplicates(items, (item) => item.url).map((item) => item.title)).toEqual([
+      "第一章",
+      "第二章",
+      "第三章",
+    ]);
   });
 });
 

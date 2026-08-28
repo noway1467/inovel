@@ -38,8 +38,10 @@ const contentCacheTtlMs = 7 * 24 * 60 * 60 * 1000;
  *     最新几章
  * v7: 目录探测按章节序号排序，并保留 title/alt 里的源站标题；
  *     旧缓存保存了“最新章节块”的倒序/缺序结果
+ * v8: 剥掉目录开头的「最新章节」预告段（含详情页信息栏那一行），旧缓存里
+ *     第 1 条是全书最后一章 —— 打开书直接剧透大结局
  */
-const pipelineVersion = "v7";
+const pipelineVersion = "v8";
 
 /** 源地址不能直接当 R2 键（含协议与斜杠），用摘要 */
 async function keyHash(value: string): Promise<string> {

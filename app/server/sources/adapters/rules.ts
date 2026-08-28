@@ -38,6 +38,7 @@ import {
   detectNextPageUrl,
   detectObfuscatedChapters,
   detectTocPageUrl,
+  stripLeadingDuplicates,
 } from "~/server/sources/toc-detect";
 import { detectContentParagraphs } from "~/server/sources/content-detect";
 import { detectJieqiArticleNo, fetchJieqiToc } from "~/server/sources/jieqi-toc";
@@ -487,17 +488,31 @@ export const rulesAdapter: SourceAdapter = {
        */
       const urlIsTemplate = /@get:\{/.test(tocUrlRule) || /\{\{\s*\$\./.test(tocUrlRule);
 
+      /** 本页按规则取到的原始条目，先不去重 —— 剥离预告块要用到重复信息 */
+      const pageItems: SourceChapter[] = [];
       for (const item of evalRuleNodes(doc, tocListRule)) {
         const title = evalRuleOne(item, tocNameRule);
         const href = urlIsTemplate
           ? buildChapterUrlFromTemplate(tocUrlRule, item, tocRequest.vars)
           : evalRuleOne(item, tocUrlRule);
         if (!title || !href) continue;
-        const externalKey = resolveUrl(pageUrl, href);
-        // 目录页常有"最新章节"重复块，按地址去重
-        if (seen.has(externalKey)) continue;
-        seen.add(externalKey);
-        chapters.push({ externalKey, title });
+        pageItems.push({ externalKey: resolveUrl(pageUrl, href), title });
+      }
+
+      /**
+       * 目录页顶上常挂一段「最新章节」预告，与正文目录是同一批章节的重复入口，
+       * 而且是倒序的。tocList 选择器分不开两段（同一个 `<dl>`、同样是 `<dd>`），
+       * 于是预告条目排在最前，去重时又是首次出现胜出 —— 结果目录第 1 条是
+       * 全书最后一章。35ge 的斗罗大陆就是这样，打开书就被剧透「大结局」。
+       *
+       * 剥离按页做：跨页合并后再剥会误伤 —— 分页目录里第 1 页的章节在后面
+       * 几页本来就不会重复出现，那时「后面还出现」这个判据已经失效了。
+       */
+      for (const item of stripLeadingDuplicates(pageItems, (entry) => entry.externalKey)) {
+        // 跨页仍可能撞地址（预告块、分页边界重叠），按地址去重
+        if (seen.has(item.externalKey)) continue;
+        seen.add(item.externalKey);
+        chapters.push(item);
       }
 
       /**

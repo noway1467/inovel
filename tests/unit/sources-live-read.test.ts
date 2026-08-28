@@ -130,6 +130,38 @@ describe("getLiveToc", () => {
     expect(second.chapters[0]?.title).toBe("另一本第一章");
   });
 
+  it("目录顶上的「最新章节」预告块不占前几条", async () => {
+    /**
+     * 真实形态（35ge.info 斗罗大陆）：同一个 `<dl>` 里先挂 3 条倒序预告，
+     * 再是正文目录，两段地址完全重叠。tocList 选择器分不开两段，而按地址
+     * 去重是首次出现胜出 —— 不剥离的话目录第 1 条就是全书最后一章，
+     * 用户点开书直接被剧透大结局。
+     */
+    responses.set(
+      "https://novels.example.org/book/3",
+      `<html><body><div class="listmain"><dl>
+        <dt>《示例》最新章节</dt>
+        <dd><a href="/c/3">第三章 归途</a></dd>
+        <dd><a href="/c/2">第二章 抵达</a></dd>
+        <dd><a href="/c/1">第一章 启程</a></dd>
+        <dt>《示例》正文</dt>
+        <dd><a href="/c/1">第一章 启程</a></dd>
+        <dd><a href="/c/2">第二章 抵达</a></dd>
+        <dd><a href="/c/3">第三章 归途</a></dd>
+      </dl></div></body></html>`
+    );
+    const id = await sourceId();
+
+    const toc = await getLiveToc(db, bucket, id, "https://novels.example.org/book/3");
+    expect(toc.chapters.map((c) => c.title)).toEqual([
+      "第一章 启程",
+      "第二章 抵达",
+      "第三章 归途",
+    ]);
+    // 预告块的章节仍在，只是不再重复占位
+    expect(new Set(toc.chapters.map((c) => c.key)).size).toBe(3);
+  });
+
   it("停用的源拒绝读取", async () => {
     const id = await sourceId();
     await db.update(contentSources).set({ status: "disabled" }).where(eq(contentSources.id, id));

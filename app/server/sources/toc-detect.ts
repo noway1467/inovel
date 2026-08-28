@@ -546,6 +546,56 @@ function matchesSection(text: string, words: string[]): boolean {
 }
 
 /**
+ * 丢掉开头那段「最新章节」预告。
+ *
+ * 预告块与正文目录是同一批章节的重复入口，且几乎总是倒序。按地址去重时
+ * 保留首次出现，于是预告抢在正文之前 —— 35ge 的斗罗大陆就是这样：目录
+ * 第 1 条是「第二百三十六章 大结局，最后一个条件（全书完）」，点开书直接
+ * 被剧透，而正文末尾的同一章反倒被当成重复丢掉了。
+ *
+ * 判据不看标签也不看文案，只用位置关系：预告必然排在正文目录**之前**，
+ * 且它每一条的地址在后面都会再出现一次。所以从头丢掉「地址在后面还会
+ * 出现」的那一段，遇到第一条「唯一、或已是最后一次出现」的条目就停。
+ *
+ * 这样既不会删掉任何唯一章节，也不重排顺序。正文目录内部若仍有重复地址，
+ * 交给调用方原有的去重。
+ */
+export function stripLeadingDuplicates<T>(items: T[], keyOf: (item: T) => string): T[] {
+  const lastIndex = new Map<string, number>();
+  items.forEach((item, index) => lastIndex.set(keyOf(item), index));
+
+  let start = 0;
+  while (start < items.length && (lastIndex.get(keyOf(items[start]!)) ?? start) > start) {
+    start += 1;
+  }
+
+  /**
+   * 剩得太少说明「开头都是重复」这个读法不成立（整页只有预告块、或页面把
+   * 目录整份渲染了两遍且很短），原样返回比裁到空好。
+   */
+  return items.length - start >= 3 ? items.slice(start) : items;
+}
+
+/** 节点自身的直接文字，不含任何子元素（也就不含链接文字） */
+function directText(node: XmlNode): string {
+  let out = "";
+  for (const child of node.children) {
+    if (child.name === textNodeName) out += child.text;
+  }
+  return out.replace(/\s+/g, " ").trim();
+}
+
+/** 后代里有几个 <a> */
+function countLinks(node: XmlNode): number {
+  let total = 0;
+  for (const child of elementChildren(node)) {
+    if (child.name === "a") total += 1;
+    total += countLinks(child);
+  }
+  return total;
+}
+
+/**
  * 收集容器内的直接链接（含其后代 a，但不跨越嵌套的候选容器）。
  *
  * 按 DOM 顺序走，并顺带认出「最新章节」小标题：命中之后的链接标成 skip，
@@ -591,6 +641,28 @@ function collectLinks(container: XmlNode): { title: string; href: string; skip: 
           continue;
         }
       }
+
+      /**
+       * 标签与链接写在同一行的形态，详情页的信息栏几乎都是这样：
+       *
+       *     <p>最新章节：<a href="…">第二百三十六章 大结局（全书完）</a></p>
+       *
+       * 上面那轮认不出它 —— 节点自身含链接，按判据不算小标题。于是这条
+       * 「最新章节」链接以正常条目混进来，还因为位于页面最上方而在按地址
+       * 去重时胜出：35ge 的斗罗大陆目录第 1 条就成了大结局。
+       *
+       * 只认「自身直接文字命中且**只有一个**链接」，并且只跳过这一个节点、
+       * 不切换 inLatest —— 信息栏是零散一行，不是一段区块。
+       */
+      const own = directText(child);
+      if (own && own.length <= 20 && matchesSection(own, latestSectionTexts) && countLinks(child) === 1) {
+        const wasInLatest = inLatest;
+        inLatest = true;
+        walk(child);
+        inLatest = wasInLatest;
+        continue;
+      }
+
       walk(child);
     }
   };
@@ -678,16 +750,25 @@ export function detectChapterList(root: XmlNode, pageUrl: string): DetectedChapt
   const best = candidates[0];
   if (!best) return [];
 
-  const seen = new Set<string>();
-  const chapters: (DetectedChapter & { domIndex: number })[] = [];
-  let domIndex = 0;
+  /**
+   * 先按 DOM 顺序留全，剥掉开头的重复预告段之后才去重。
+   *
+   * 顺序不能颠倒：先去重的话，预告块（在前）会把正文目录里的同一章挤掉，
+   * 「哪些是重复的」这个信息也随之丢失，剥离便无从下手。
+   */
+  const ordered: DetectedChapter[] = [];
   for (const link of best.links) {
     const title = link.title.trim();
     if (!title || noiseTitles.has(title)) continue;
-    const url = resolveUrl(pageUrl, link.href);
-    if (seen.has(url)) continue;
-    seen.add(url);
-    chapters.push({ title, url, domIndex: domIndex++ });
+    ordered.push({ title, url: resolveUrl(pageUrl, link.href) });
+  }
+
+  const seen = new Set<string>();
+  const chapters: DetectedChapter[] = [];
+  for (const item of stripLeadingDuplicates(ordered, (entry) => entry.url)) {
+    if (seen.has(item.url)) continue;
+    seen.add(item.url);
+    chapters.push(item);
   }
   return sortDetectedChapters(keepDominantShape(chapters, pageUrl));
 }
