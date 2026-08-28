@@ -3,6 +3,7 @@ import { Button } from "~/components/ui/button";
 import { Label } from "~/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "~/components/ui/select";
 import { Slider } from "~/components/ui/slider";
+import { Switch } from "~/components/ui/switch";
 import { Sheet, SheetBody, SheetContent, SheetHeader, SheetTitle } from "~/components/ui/sheet";
 import { cn } from "~/lib/utils";
 import {
@@ -152,10 +153,14 @@ export function ReaderSettingsPanel({
               </Select>
             </div>
             <div className="space-y-2">
-              {/* 只在宽屏上起作用：把行长压到上限，窄屏由上面的左右留白负责 */}
-              <Label>正文宽度</Label>
+              {/*
+                只在宽屏上起作用：把行长压到上限，窄屏由上面的左右留白负责。
+                原来叫「正文宽度」，与「左右留白」看着像同一件事的两种说法，
+                这里按它真正干的事命名 —— 一行最多多宽。
+              */}
+              <Label>宽屏行宽</Label>
               <Select value={settings.margin} onValueChange={(value) => update({ margin: value as ReaderSettings["margin"] })}>
-                <SelectTrigger aria-label="正文宽度">
+                <SelectTrigger aria-label="宽屏行宽">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -211,6 +216,21 @@ export function ReaderSettingsPanel({
                 </button>
               ))}
             </div>
+          </section>
+
+          <section className="flex items-center justify-between gap-3 rounded-md border border-border p-3">
+            <div className="min-w-0">
+              <Label htmlFor="reader-allow-copy">正文可复制</Label>
+              <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                关掉后正文不能选中，翻页时不会误选出一片蓝底。
+              </p>
+            </div>
+            <Switch
+              id="reader-allow-copy"
+              checked={settings.allowCopy}
+              onCheckedChange={(checked) => update({ allowCopy: checked })}
+              aria-label="正文可复制"
+            />
           </section>
 
           <Button

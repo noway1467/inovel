@@ -322,6 +322,8 @@ export default function SourceChapterPage({ loaderData }: Route.ComponentProps) 
 
   /** 点正文中间三分之一切换上下栏，两侧交给 PagedText 翻页 */
   function onSurfaceClick(event: React.MouseEvent) {
+    // 划词的收尾点击不该顺手把上下栏亮出来盖住选中的句子
+    if ((window.getSelection()?.toString().length ?? 0) > 0) return;
     const rect = event.currentTarget.getBoundingClientRect();
     const ratio = (event.clientX - rect.left) / rect.width;
     if (ratio < 0.33 || ratio > 0.67) return;
@@ -446,6 +448,7 @@ export default function SourceChapterPage({ loaderData }: Route.ComponentProps) 
           // 左右留白与行长上限，与本地阅读器同一套设置
           sideInset={resolveSideInset(settings)}
           paragraphSpacing={settings.paragraphSpacing}
+          allowCopy={settings.allowCopy}
           pageIndex={pageIndex}
           onPageIndexChange={setPageIndex}
           onPaginationChange={setPagination}

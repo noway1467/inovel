@@ -1,5 +1,5 @@
 import { Link } from "react-router";
-import { BookOpen, Clock, Library, Mail, Settings } from "lucide-react";
+import { BookOpen, Mail } from "lucide-react";
 import type { Route } from "./+types/settings";
 import { Avatar, AvatarFallback, AvatarImage } from "~/components/ui/avatar";
 import { Button } from "~/components/ui/button";
@@ -58,14 +58,15 @@ export default function SettingsPage({ loaderData }: Route.ComponentProps) {
   }
 
   const { user, preferences } = loaderData;
-  const entries = [
-    { icon: Library, label: "我的书架", to: "/library" },
-    { icon: Clock, label: "阅读历史", to: "/history" },
-    { icon: Settings, label: "账号设置", to: "/settings", active: true },
-  ];
 
   return (
     <div className="mx-auto max-w-2xl space-y-4">
+      {/*
+        账号那一行把身份和退出一起放完：退出登录原来单独占一张「登录状态」
+        卡片排在页尾，而顶栏头像菜单里也有一个。
+        这页上方原来还有一排 我的书架 / 阅读历史 / 账号设置 导航 ——
+        前两项主导航与移动底栏都常显，第三项指向本页，整排都是重复的。
+      */}
       <section className="flex items-center gap-3 rounded-lg border border-border bg-surface p-4">
         <Avatar className="size-12">
           {user.image && <AvatarImage src={user.image} alt={user.name} />}
@@ -78,22 +79,11 @@ export default function SettingsPage({ loaderData }: Route.ComponentProps) {
             {user.email}
           </p>
         </div>
+        {/* 窄屏上别被昵称/邮箱挤扁 */}
+        <div className="shrink-0">
+          <SignOutButton />
+        </div>
       </section>
-
-      <nav className="flex gap-1 rounded-lg border border-border bg-surface p-1.5">
-        {entries.map((entry) => (
-          <Link
-            key={entry.label}
-            to={entry.to}
-            className={`flex flex-1 items-center justify-center gap-2 rounded-md px-3 py-2 text-sm transition-colors ${
-              entry.active ? "bg-muted font-medium" : "hover:bg-muted"
-            }`}
-          >
-            <entry.icon className="size-4" />
-            {entry.label}
-          </Link>
-        ))}
-      </nav>
 
       <SkinPicker />
 
@@ -101,13 +91,17 @@ export default function SettingsPage({ loaderData }: Route.ComponentProps) {
 
       <PasswordForm />
 
+      {/*
+        这块只读，改不了任何东西 —— 名字里写清"在阅读器里改"，
+        免得看着像个能点的设置区，点半天没反应。
+      */}
       <section className="rounded-lg border border-border bg-surface p-4 sm:p-5">
         <h2 className="flex items-center gap-2 text-base font-semibold">
           <BookOpen className="size-4" />
-          阅读偏好
+          正文排版（在阅读器里调）
         </h2>
         <p className="mt-1.5 text-sm text-muted-foreground">
-          在阅读器内调整主题和排版，会自动保存并同步到云端。
+          打开任意一章，点右上角「阅读设置」调主题与排版，改完自动同步到云端。
         </p>
         <dl className="mt-3 grid gap-x-4 gap-y-2 text-sm sm:grid-cols-3">
           <div className="flex justify-between gap-2 sm:block">
@@ -129,16 +123,6 @@ export default function SettingsPage({ loaderData }: Route.ComponentProps) {
             </dd>
           </div>
         </dl>
-      </section>
-
-      <section className="rounded-lg border border-border bg-surface p-4 sm:p-5">
-        <h2 className="text-base font-semibold">登录状态</h2>
-        <p className="mt-1.5 text-sm text-muted-foreground">
-          退出后需要重新登录才能查看书架与阅读进度。
-        </p>
-        <div className="mt-3">
-          <SignOutButton />
-        </div>
       </section>
     </div>
   );

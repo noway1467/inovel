@@ -33,6 +33,13 @@ export interface PagedTextProps {
   sideInset?: string;
   /** 段距，与 ReaderSettings.paragraphSpacing 同一约定：百分数（80 表示 0.8em） */
   paragraphSpacing?: number;
+  /**
+   * 允许选中/复制正文，对应 ReaderSettings.allowCopy，默认关。
+   *
+   * 关掉时点两侧就是干脆的翻页，不会拖出一片蓝底；开着时翻页会先让开选区，
+   * 免得摘句子摘到一半被翻走。
+   */
+  allowCopy?: boolean;
   /** 页数与当前页变化时回调，供外层渲染页码与上下页按钮 */
   onPaginationChange?: (state: { pageIndex: number; pageCount: number }) => void;
   /** 外层控制翻页用；受控值变化时跟随 */
@@ -51,6 +58,7 @@ export function PagedText({
   lineHeight,
   sideInset = "0.75rem",
   paragraphSpacing = 80,
+  allowCopy = false,
   pageIndex,
   pageCount: _ignored,
   onPageIndexChange,
@@ -151,8 +159,12 @@ export function PagedText({
   return (
     <div
       ref={viewportRef}
-      className="relative h-full overflow-hidden"
+      className={`relative h-full overflow-hidden ${allowCopy ? "select-text" : "select-none"}`}
+      // user-select 只拦鼠标划选，键盘复制要单独挡
+      onCopy={allowCopy ? undefined : (event) => event.preventDefault()}
       onClick={(event) => {
+        // 划词的收尾点击不该翻页，否则选区连着一起丢
+        if ((window.getSelection()?.toString().length ?? 0) > 0) return;
         // 左三分之一往前，右三分之一往后，中间留给上下栏切换
         const rect = event.currentTarget.getBoundingClientRect();
         const ratio = (event.clientX - rect.left) / rect.width;

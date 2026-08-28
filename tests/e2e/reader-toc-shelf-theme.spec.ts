@@ -50,6 +50,35 @@ test.describe("阅读页目录定位", () => {
   });
 });
 
+test.describe("正文可复制开关", () => {
+  test("默认禁止复制，打开后正文才可选", async ({ page }) => {
+    await loginBrowser(page);
+    await openReader(page);
+
+    const viewport = page.locator(".reader-viewport");
+    const userSelect = () =>
+      viewport.evaluate((element) => getComputedStyle(element).userSelect);
+
+    // 默认关：正文选不动，翻页时不会拖出一片蓝底
+    expect(await userSelect()).toBe("none");
+
+    await revealReaderChrome(page);
+    await page.locator('button[aria-label="阅读设置"]').click();
+    const toggle = page.getByRole("switch", { name: "正文可复制" });
+    await expect(toggle).toBeVisible();
+    await expect(toggle).toHaveAttribute("aria-checked", "false");
+
+    await toggle.click();
+    await expect(toggle).toHaveAttribute("aria-checked", "true");
+    expect(await userSelect()).not.toBe("none");
+
+    // 关回去，设置存在 localStorage 里，别影响其他用例
+    await toggle.click();
+    await expect(toggle).toHaveAttribute("aria-checked", "false");
+    expect(await userSelect()).toBe("none");
+  });
+});
+
 test.describe("阅读页书架按钮", () => {
   test("顶栏按钮是加入/移出书架，文案随状态变化", async ({ page }) => {
     await loginBrowser(page);

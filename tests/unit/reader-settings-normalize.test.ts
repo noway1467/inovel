@@ -1,9 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   defaultReaderSettings,
+  loadReaderSettings,
   normalizePaginationMode,
   normalizeReaderTheme,
   normalizeSideMargin,
+  readerSettingsKey,
   resolveLineHeight,
   resolveReaderTheme,
   resolveSideInset,
@@ -140,5 +142,48 @@ describe("resolveSideInset", () => {
     });
     expect(inset).not.toContain("NaN");
     expect(inset).toContain(`${defaultReaderSettings.sideMargin}%`);
+  });
+});
+
+describe("allowCopy", () => {
+  /** node 环境没有 localStorage，塞一个够 loadReaderSettings 用的 */
+  function stubStorage(raw: string | null) {
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => (key === readerSettingsKey ? raw : null),
+      setItem: () => {},
+    });
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("默认禁止复制", () => {
+    expect(defaultReaderSettings.allowCopy).toBe(false);
+  });
+
+  it("首次进入（没有存过设置）也是禁止复制", () => {
+    stubStorage(null);
+    expect(loadReaderSettings().allowCopy).toBe(false);
+  });
+
+  it("老版本存的设置里没有这个字段，按禁止算", () => {
+    stubStorage(JSON.stringify({ fontSize: 20 }));
+    const loaded = loadReaderSettings();
+    expect(loaded.allowCopy).toBe(false);
+    // 必须是真布尔：undefined 交给 className 三元会当假，但存回去仍是脏值
+    expect(typeof loaded.allowCopy).toBe("boolean");
+  });
+
+  it("显式打开后保留", () => {
+    stubStorage(JSON.stringify({ allowCopy: true }));
+    expect(loadReaderSettings().allowCopy).toBe(true);
+  });
+
+  it("只认真正的 true，存坏的值一律按禁止算", () => {
+    for (const value of ["true", 1, {}, null]) {
+      stubStorage(JSON.stringify({ allowCopy: value }));
+      expect(loadReaderSettings().allowCopy).toBe(false);
+    }
   });
 });

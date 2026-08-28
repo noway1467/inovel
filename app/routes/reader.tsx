@@ -549,6 +549,12 @@ export default function ReaderPage({ loaderData }: Route.ComponentProps) {
    * 现在只认点击，且只认屏幕中心那一段。
    */
   function onMainClick(event: React.MouseEvent<HTMLDivElement>) {
+    /*
+      划词的收尾点击既不该翻页也不该切栏。原来这道判断在翻页之后，
+      开着「正文可复制」在左右两侧选字，松手就翻走了 —— 选区连着一起丢。
+    */
+    if ((window.getSelection()?.toString().length ?? 0) > 0) return;
+
     const rect = event.currentTarget.getBoundingClientRect();
     const ratio = (event.clientX - rect.left) / rect.width;
     if (isPaginated) {
@@ -564,8 +570,6 @@ export default function ReaderPage({ loaderData }: Route.ComponentProps) {
       // 滚动模式两侧不翻页，但同样不该触发上下栏
       return;
     }
-    // 划词选文的收尾点击不该顺手切换栏
-    if ((window.getSelection()?.toString().length ?? 0) > 0) return;
     if (uiVisible) hideUi();
     else showUi();
   }
@@ -687,9 +691,16 @@ export default function ReaderPage({ loaderData }: Route.ComponentProps) {
       <main
         ref={scrollRef}
         onClick={onMainClick}
+        /*
+          正文可复制关掉时连键盘复制一起挡：user-select 只拦鼠标划选，
+          Ctrl+A / Ctrl+C 照样能把整章带走。
+        */
+        onCopy={settings.allowCopy ? undefined : (event) => event.preventDefault()}
         className={`reader-viewport relative z-0 flex-1 overflow-x-hidden ${
+          settings.allowCopy ? "select-text" : "select-none"
+        } ${
           isPaginated
-            ? "cursor-pointer select-none overflow-y-hidden"
+            ? "cursor-pointer overflow-y-hidden"
             : "cursor-auto overflow-y-auto pt-[max(3.5rem,env(safe-area-inset-top))] pb-[max(4.5rem,env(safe-area-inset-bottom))]"
         }`}
       >

@@ -29,9 +29,12 @@ test("读者账户菜单不暴露工作台，作品列表在桌面使用双列�
   await expect(accountTrigger).toHaveAttribute("aria-expanded", "true");
   const accountMenu = page.getByRole("menu");
   await expect(accountMenu).toBeVisible();
-  await expect(accountMenu.getByText("阅读", { exact: true })).toBeVisible();
-  await expect(accountMenu.getByText("账号", { exact: true })).toBeVisible();
-  await expect(accountMenu.getByText("创作", { exact: true })).toHaveCount(0);
+  // 只管账号三件事；书架/最近阅读在主导航与移动底栏，这里不再放第三份
+  await expect(accountMenu.getByRole("menuitem", { name: /账号设置/ })).toBeVisible();
+  await expect(accountMenu.getByRole("menuitem", { name: /通知中心/ })).toBeVisible();
+  await expect(accountMenu.getByRole("menuitem", { name: /退出登录/ })).toBeVisible();
+  await expect(accountMenu.getByRole("menuitem", { name: /我的书架/ })).toHaveCount(0);
+  await expect(accountMenu.getByRole("menuitem", { name: /最近阅读/ })).toHaveCount(0);
   await expect(accountMenu.getByRole("menuitem", { name: /导入小说/ })).toHaveCount(0);
 
   await page.keyboard.press("Escape");

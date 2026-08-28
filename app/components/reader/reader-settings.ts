@@ -81,6 +81,14 @@ export interface ReaderSettings {
   indent: "none" | "2char";
   letterSpacing: "default" | "wide";
   paginationMode: PaginationMode;
+  /**
+   * 允许选中/复制正文。默认关。
+   *
+   * 分页模式下点击左右两侧就是翻页，手指或鼠标稍微一拖就选中一片文字，
+   * 蓝底加系统的复制气泡会盖住正文 —— 关掉之后翻页手感干净。
+   * 想摘句子的人打开它：两个阅读器都会放开选中，翻页也会先让开选区。
+   */
+  allowCopy: boolean;
 }
 
 export const defaultReaderSettings: ReaderSettings = {
@@ -95,6 +103,7 @@ export const defaultReaderSettings: ReaderSettings = {
   indent: "2char",
   letterSpacing: "default",
   paginationMode: "cover",
+  allowCopy: false,
 };
 
 export const sideMarginRange = { min: 0, max: 20, step: 1 } as const;
@@ -178,6 +187,8 @@ export function loadReaderSettings(): ReaderSettings {
       paginationMode: normalizePaginationMode(parsed.paginationMode),
       // 老版本存的设置里没有这个字段，展开后会是 undefined
       sideMargin: normalizeSideMargin(parsed.sideMargin),
+      // 同上；这里必须落成真布尔，undefined 交给 style 会当"没设置"处理
+      allowCopy: parsed.allowCopy === true,
     };
   } catch {
     return defaultReaderSettings;

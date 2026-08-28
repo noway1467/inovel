@@ -1,28 +1,9 @@
-import { Form, Link, NavLink, useNavigate } from "react-router";
-import {
-  Bell,
-  BookOpenText,
-  Clock3,
-  Compass,
-  LayoutGrid,
-  Library,
-  LogOut,
-  Search,
-  Settings2,
-  Trophy,
-} from "lucide-react";
-import { Avatar, AvatarFallback, AvatarImage } from "~/components/ui/avatar";
+import { Form, Link, NavLink } from "react-router";
+import { BookOpenText, Clock3, Compass, LayoutGrid, Library, Search, Trophy } from "lucide-react";
 import { Button } from "~/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "~/components/ui/dropdown-menu";
 import { Input } from "~/components/ui/input";
 import { ThemeToggle } from "~/components/theme-toggle";
+import { UserMenu } from "~/components/layout/user-menu";
 import { WorkbenchMenu } from "~/components/layout/workbench-menu";
 import { cn } from "~/lib/utils";
 
@@ -47,8 +28,6 @@ export function AppHeader({
   isAdmin: boolean;
   unreadCount: number;
 }) {
-  const navigate = useNavigate();
-
   return (
     <header className="sticky top-0 z-40 hidden h-16 border-b border-border bg-surface/95 shadow-[0_1px_12px_rgba(31,45,36,0.05)] backdrop-blur md:flex">
       <div className="mx-auto flex w-full max-w-[1180px] items-center gap-4 px-5">
@@ -94,69 +73,7 @@ export function AppHeader({
           <WorkbenchMenu isAuthor={isAuthor} isAdmin={isAdmin} />
           <ThemeToggle />
           {user ? (
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <button
-                  type="button"
-                  aria-label="用户菜单"
-                  className="flex size-10 items-center justify-center rounded-full outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                >
-                  <Avatar className="size-8">
-                    {user.image && <AvatarImage src={user.image} alt={user.name} />}
-                    <AvatarFallback className="bg-secondary text-secondary-foreground">
-                      {user.name.slice(0, 1).toUpperCase()}
-                    </AvatarFallback>
-                  </Avatar>
-                </button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-60">
-                <DropdownMenuLabel>
-                  <p className="truncate font-medium">{user.name}</p>
-                  <p className="truncate text-xs font-normal text-muted-foreground">{user.email}</p>
-                </DropdownMenuLabel>
-                <DropdownMenuSeparator />
-                <DropdownMenuLabel className="py-1 text-[10px] font-semibold tracking-[0.18em] text-muted-foreground">
-                  阅读
-                </DropdownMenuLabel>
-                <DropdownMenuItem onSelect={() => navigate("/library")}>
-                  <Library className="size-4" />
-                  我的书架
-                </DropdownMenuItem>
-                <DropdownMenuItem onSelect={() => navigate("/history")}>
-                  <Clock3 className="size-4" />
-                  最近阅读
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuLabel className="py-1 text-[10px] font-semibold tracking-[0.18em] text-muted-foreground">
-                  账号
-                </DropdownMenuLabel>
-                <DropdownMenuItem onSelect={() => navigate("/settings")}>
-                  <Settings2 className="size-4" />
-                  <span>
-                    <span className="block">账号设置</span>
-                    <span className="block text-[10px] text-muted-foreground">资料、密码与阅读偏好</span>
-                  </span>
-                </DropdownMenuItem>
-                <DropdownMenuItem onSelect={() => navigate("/notifications")}>
-                  <Bell className="size-4" />
-                  通知中心
-                  {unreadCount > 0 && (
-                    <span className="ml-auto flex size-5 items-center justify-center rounded-full bg-primary text-[10px] text-primary-foreground">
-                      {unreadCount > 99 ? "99+" : unreadCount}
-                    </span>
-                  )}
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  onSelect={async () => {
-                    await fetch("/api/auth/sign-out", { method: "POST" });
-                    window.location.reload();
-                  }}
-                >
-                  <LogOut className="size-4" />
-                  退出登录
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+            <UserMenu user={user} unreadCount={unreadCount} />
           ) : (
             <div className="flex items-center gap-1">
               <Button variant="ghost" size="sm" asChild>

@@ -85,16 +85,16 @@ export default function CreatorPage({ loaderData }: Route.ComponentProps) {
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-xl font-semibold">我的作品</h1>
+          {/* 与工作台菜单同名。原来 h1 和下面那节 h2 都叫「我的作品」，一页里重了一遍 */}
+          <h1 className="text-xl font-semibold">作品管理</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            管理作品、上传小说、编辑章节与作品信息（{loaderData.author.penName} ·{" "}
-            {loaderData.books.length} 部作品）
+            编辑章节与作品信息（{loaderData.author.penName} · {loaderData.books.length} 部作品）
           </p>
         </div>
         <Button asChild>
           <Link to="/creator/upload">
             <FileUp className="size-4" />
-            上传小说
+            导入小说
           </Link>
         </Button>
       </div>

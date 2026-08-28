@@ -232,7 +232,8 @@ export default function AdminModerationPage({ loaderData }: Route.ComponentProps
   return (
     <div className="mx-auto max-w-4xl space-y-5">
       <div>
-        <h1 className="text-xl font-semibold">审核工作台</h1>
+        {/* 与工作台菜单同名：这页原来叫「审核工作台」，菜单叫「审核中心」 */}
+        <h1 className="text-xl font-semibold">内容审核</h1>
         <p className="mt-1 text-sm text-muted-foreground">
           待审章节 {totalPending} 条，共 {groups.length} 部作品
         </p>

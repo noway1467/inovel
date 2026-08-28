@@ -5,10 +5,6 @@ import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import { Switch } from "~/components/ui/switch";
-import { Link as RouterLink } from "react-router";
-import { ClipboardCheck } from "lucide-react";
-import { Users } from "lucide-react";
-import { SlidersHorizontal } from "lucide-react";
 import { EmptyState } from "~/components/state/empty-state";
 import { cloudflareContext } from "~/server/context";
 import { createDb } from "~/server/db";
@@ -112,9 +108,17 @@ export default function AdminPage({ loaderData }: Route.ComponentProps) {
 
   return (
     <div className="mx-auto max-w-2xl space-y-6">
+      {/*
+        这页原来叫「管理后台」，底下还挂着三张只有一个按钮的卡片
+        （用户与角色 / 运营配置 / 内容审核），而顶栏「工作台」里同样有这三项 ——
+        同一个页面两个入口、两套名字。链接卡片撤了，这页只留自己独有的
+        两个真开关，名字也改成它实际管的东西。别的管理页都从工作台进。
+      */}
       <div>
-        <h1 className="text-xl font-semibold">管理后台</h1>
-        <p className="mt-1 text-sm text-muted-foreground">系统设置与运营配置。</p>
+        <h1 className="text-xl font-semibold">站点设置</h1>
+        <p className="mt-1 text-sm text-muted-foreground">
+          全站生效的开关。用户、审核、运营与在线源在顶栏「工作台」里。
+        </p>
       </div>
 
       <section className="rounded-lg border border-border bg-surface p-5">
@@ -160,51 +164,6 @@ export default function AdminPage({ loaderData }: Route.ComponentProps) {
           <Badge variant="secondary">当前 {maxUploadMb}MB</Badge>
         </div>
         {uploadMessage && <p className="mt-3 text-sm text-muted-foreground">{uploadMessage}</p>}
-      </section>
-
-      <section className="rounded-lg border border-border bg-surface p-5">
-        <div className="flex items-center justify-between gap-4">
-          <div>
-            <h2 className="text-base font-semibold">用户与角色</h2>
-            <p className="mt-1 text-sm text-muted-foreground">搜索用户、调整角色、启用或禁用账号。</p>
-          </div>
-          <Button variant="outline" asChild>
-            <RouterLink to="/admin/users">
-              <Users className="size-4" />
-              用户管理
-            </RouterLink>
-          </Button>
-        </div>
-      </section>
-
-      <section className="rounded-lg border border-border bg-surface p-5">
-        <div className="flex items-center justify-between gap-4">
-          <div>
-            <h2 className="text-base font-semibold">运营配置</h2>
-            <p className="mt-1 text-sm text-muted-foreground">维护分类、标签与首页推荐位。</p>
-          </div>
-          <Button variant="outline" asChild>
-            <RouterLink to="/admin/operations">
-              <SlidersHorizontal className="size-4" />
-              进入运营台
-            </RouterLink>
-          </Button>
-        </div>
-      </section>
-
-      <section className="rounded-lg border border-border bg-surface p-5">
-        <div className="flex items-center justify-between gap-4">
-          <div>
-            <h2 className="text-base font-semibold">内容审核</h2>
-            <p className="mt-1 text-sm text-muted-foreground">查看待审章节并执行通过/退回。</p>
-          </div>
-          <Button variant="outline" asChild>
-            <RouterLink to="/admin/moderation">
-              <ClipboardCheck className="size-4" />
-              进入审核台
-            </RouterLink>
-          </Button>
-        </div>
       </section>
     </div>
   );
