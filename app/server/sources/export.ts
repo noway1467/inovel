@@ -30,6 +30,7 @@ interface LegadoExport {
   bookSourceGroup?: string;
   bookSourceComment?: string;
   enabled: boolean;
+  header?: string;
   weight?: number;
   searchUrl?: string;
   ruleSearch?: Record<string, string>;
@@ -84,6 +85,9 @@ export function toLegadoSource(source: ExportableSource): LegadoExport | null {
   };
   if (comment) out.bookSourceComment = comment;
   if (typeof source.weight === "number") out.weight = source.weight;
+  if (config.headers && typeof config.headers === "object") {
+    out.header = JSON.stringify(config.headers);
+  }
   if (config.searchUrl) out.searchUrl = config.searchUrl;
 
   out.ruleSearch = compact({

@@ -1,5 +1,6 @@
 import { UnsupportedRuleError, parseRule, stripListPrefix } from "~/server/sources/rule-expr";
 import { splitUrlAndOptions, templateIsSupported } from "~/server/sources/url-options";
+import { isSupportedAjaxRule } from "~/server/sources/java-ajax";
 
 /**
  * 开源阅读（Legado）书源 JSON → 内部规则配置。
@@ -56,6 +57,9 @@ export interface RulesConfig {
   contentReplaceRegex?: string | null;
   /** 源站基地址，用于相对链接补全 */
   baseUrl?: string | null;
+
+  /** Legado 全局 header，用于搜索、目录、正文等所有请求。 */
+  headers?: Record<string, string> | null;
 
   /**
    * 发现页（分类浏览）。原样存书源写的模板，取书单时才解析 ——
@@ -114,6 +118,7 @@ export interface LegadoBookSource {
   /** 书源自带权重，用作搜索排序的初始优先级 */
   weight?: number;
   bookSourceComment?: string;
+  header?: string | Record<string, unknown>;
   searchUrl?: string;
   ruleSearch?: LegadoSearchRule;
   ruleBookInfo?: LegadoInfoRule;
@@ -234,6 +239,31 @@ function clean(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed ? trimmed : null;
+}
+
+/**
+ * 保留书源自带请求头，而不是只吃规则。
+ * Legado 源经常靠 UA/Referer 过反爬；丢掉它，规则翻译得再对也会被源站拒掉。
+ */
+function parseHeaderMap(value: unknown): Record<string, string> | null {
+  if (typeof value === "string") {
+    const text = value.trim();
+    if (!text) return null;
+    try {
+      return parseHeaderMap(JSON.parse(text));
+    } catch {
+      const header = /["']?User-Agent["']?\s*:\s*(["'])([\s\S]*?)\1/i.exec(text);
+      return header?.[2] ? { "user-agent": header[2] } : null;
+    }
+  }
+  if (typeof value !== "object" || value === null) return null;
+  const out: Record<string, string> = {};
+  for (const [key, raw] of Object.entries(value)) {
+    if (typeof raw !== "string" || !raw.trim()) continue;
+    if (/^(host|content-length|connection)$/i.test(key)) continue;
+    out[key.toLowerCase()] = raw;
+  }
+  return Object.keys(out).length > 0 ? out : null;
 }
 
 /**
@@ -361,6 +391,14 @@ function resolveRule(raw: string | null): RuleOutcome {
   }
 }
 
+/** 正文专用 AJAX 兜底；搜索/目录 AJAX 形态更复杂，仍然不硬放行。 */
+function resolveContentRule(raw: string | null): RuleOutcome {
+  if (isSupportedAjaxRule(raw)) {
+    return { state: "ok", rule: raw!, note: "已支持常见 java.ajax 正文规则" };
+  }
+  return resolveRule(raw);
+}
+
 /** 校验规则可被引擎理解；不可用时记为警告并返回 null */
 function validate(rule: string | null, label: string, warnings: string[]): string | null {
   const outcome = resolveRule(rule);
@@ -393,6 +431,9 @@ export function convertLegadoSource(raw: unknown): ConversionResult {
 
   const warnings: string[] = [];
 
+  const headers = parseHeaderMap(source.header);
+  if (headers) warnings.push("已启用书源自带请求头");
+
   const rawTocList = clean(source.ruleToc?.chapterList);
   // chapterName/chapterUrl 常写成裸属性名（"text" / "href"），
   // 缺失时按这两个默认值兜底 —— 真实书源里很常见
@@ -403,7 +444,7 @@ export function convertLegadoSource(raw: unknown): ConversionResult {
    * 正文规则是硬门槛：没有它这个源连一章都读不出来，装进来毫无意义。
    * 目录则不是 —— 页面结构能探测，见下面的 tocMode。
    */
-  const contentOutcome = resolveRule(clean(source.ruleContent?.content));
+  const contentOutcome = resolveContentRule(clean(source.ruleContent?.content));
   if (contentOutcome.state === "absent") {
     throw new LegadoConversionError("缺少正文规则（ruleContent.content）");
   }
@@ -503,6 +544,7 @@ export function convertLegadoSource(raw: unknown): ConversionResult {
      */
     contentReplaceRegex: clean(source.ruleContent?.replaceRegex),
     baseUrl: endpoint,
+    headers,
 
     /**
      * 发现页规则原样存下，不走 validate —— 分类地址里带 {{page}} 算术是常态，

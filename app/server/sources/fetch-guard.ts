@@ -265,6 +265,8 @@ async function guardedFetchOnce(
 ): Promise<{ ok: true; result: GuardedFetchResult } | FetchRejection | { ok: false; code: "FETCH_FAILED"; message: string }> {
   const check = await checkSourceUrl(db, raw);
   if (!check.ok) return check;
+  const headers = init?.headers ?? {};
+  const hasUserAgent = Object.keys(headers).some((key) => key.toLowerCase() === "user-agent");
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), fetchTimeoutMs);
@@ -275,7 +277,7 @@ async function guardedFetchOnce(
       redirect: "follow",
       signal: controller.signal,
       headers: {
-        "User-Agent": userAgent,
+        ...(hasUserAgent ? {} : { "User-Agent": userAgent }),
         Accept: "*/*",
         /**
          * POST 默认按表单编码：书源里的 body 绝大多数是 `bid=65688` 这种

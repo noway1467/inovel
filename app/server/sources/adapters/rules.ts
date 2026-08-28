@@ -13,6 +13,7 @@ import {
 } from "~/server/sources/url-options";
 import { parseHtml } from "~/server/sources/html";
 import { buildSearchUrl, degradeJsRule, type RulesConfig } from "~/server/sources/legado";
+import { evalAjaxRule, isSupportedAjaxRule } from "~/server/sources/java-ajax";
 import {
   canParseRule,
   evalRuleAll,
@@ -160,11 +161,22 @@ function usableRule(raw: unknown): string | null {
   return degraded ? degraded.rule : null;
 }
 
+function sourceHeaders(config: Record<string, unknown>): Record<string, string> {
+  const raw = config.headers;
+  if (typeof raw !== "object" || raw === null) return {};
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (typeof value === "string" && value.trim()) out[key.toLowerCase()] = value;
+  }
+  return out;
+}
+
 function readConfig(config: Record<string, unknown>): RulesConfig {
   const tocList = usableRule(config.tocList);
   const tocName = usableRule(config.tocName);
   const tocUrl = usableRule(config.tocUrl);
-  const contentRule = usableRule(config.contentRule);
+  const rawContent = typeof config.contentRule === "string" ? config.contentRule : null;
+  const contentRule = isSupportedAjaxRule(rawContent) ? rawContent! : usableRule(config.contentRule);
   if (!contentRule) {
     // 正文规则没有探测兜底：没有它这个源一章都读不出来
     const raw = typeof config.contentRule === "string" ? config.contentRule.trim() : "";
@@ -200,22 +212,34 @@ function readConfig(config: Record<string, unknown>): RulesConfig {
  * 按响应内容自动判断 HTML 还是 JSON：JSONPath 规则的源返回的是 JSON，
  * 硬当 HTML 解析会得到一棵空树，规则全部落空且没有任何错误提示。
  */
-async function loadDoc(
+async function loadResponse(
   ctx: Parameters<SourceAdapter["listBooks"]>[0],
   url: string,
   /** 目录接口那类需要 POST + body 的请求，见 resolveTocUrl */
   init?: GuardedFetchInit
-): Promise<RuleDoc> {
+): Promise<{ body: string; contentType: string; setCookie?: string | null }> {
   ctx.countRequest();
   const response = await guardedFetch(ctx.db, url, {
-    headers: { Accept: "text/html,application/json;q=0.9,*/*;q=0.8", ...init?.headers },
+    headers: {
+      ...sourceHeaders(ctx.config),
+      Accept: "text/html,application/json;q=0.9,*/*;q=0.8",
+      ...init?.headers,
+    },
     ...(init?.method ? { method: init.method } : {}),
     ...(init?.body !== undefined ? { body: init.body } : {}),
   });
   if (!response.ok) throw new Error(response.message);
   if (response.result.status >= 400) throw new Error(`源返回 HTTP ${response.result.status}`);
 
-  const { body, contentType } = response.result;
+  return response.result;
+}
+
+async function loadDoc(
+  ctx: Parameters<SourceAdapter["listBooks"]>[0],
+  url: string,
+  init?: GuardedFetchInit
+): Promise<RuleDoc> {
+  const { body, contentType } = await loadResponse(ctx, url, init);
   const trimmed = body.trimStart();
   const looksJson =
     contentType.includes("json") || trimmed.startsWith("{") || trimmed.startsWith("[");
@@ -461,6 +485,36 @@ export const rulesAdapter: SourceAdapter = {
   async fetchChapter(ctx, chapter) {
     const config = readConfig(ctx.config);
 
+    /**
+     * `java.ajax` 型正文在拿到章节页前不知道真实接口地址（token 常藏在页面里），
+     * 因此不能套用“先选 DOM 再取正文”的通用路径。这里把章节页原文交给受限解释器，
+     * 由规则自己拼 AJAX 地址；网络仍全部走 guardedFetch，并把章节页 Set-Cookie 回传。
+     */
+    if (isSupportedAjaxRule(config.contentRule)) {
+      const initial = await loadResponse(ctx, chapter.externalKey);
+      const body = await evalAjaxRule(config.contentRule, {
+        baseUrl: chapter.externalKey,
+        result: initial.body,
+        ajax: async (url) => {
+          // cookie 只回传同站点 AJAX；通用规则不能变成跨域带凭据的转发器。
+          const sameSite = sameRegistrableHost(chapter.externalKey, url);
+          const response = await loadResponse(ctx, url, {
+            headers: {
+              ...(initial.setCookie && sameSite ? { Cookie: initial.setCookie } : {}),
+              "X-Requested-With": "XMLHttpRequest",
+              Referer: chapter.externalKey,
+            },
+          });
+          return response.body;
+        },
+      });
+      const text = body.includes("<") ? blockTextOf(parseHtml(body)) : body;
+      const paragraphs = toParagraphs(text);
+      if (paragraphs.length === 0) throw new Error("java.ajax 正文规则未命中内容");
+      const purified = purifyParagraphs(paragraphs, config.contentReplaceRegex);
+      return { paragraphs: purified.length > 0 ? purified : paragraphs };
+    }
+
     const paragraphs: string[] = [];
     const visited = new Set<string>();
     let pageUrl: string | null = chapter.externalKey;
@@ -517,3 +571,13 @@ export const rulesAdapter: SourceAdapter = {
     return { paragraphs: purified.length > 0 ? purified : paragraphs };
   },
 };
+
+function sameRegistrableHost(a: string, b: string): boolean {
+  try {
+    const hostA = new URL(a).hostname.toLowerCase();
+    const hostB = new URL(b).hostname.toLowerCase();
+    return hostA === hostB || hostB.endsWith(`.${hostA}`) || hostA.endsWith(`.${hostB}`);
+  } catch {
+    return false;
+  }
+}
