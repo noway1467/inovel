@@ -169,10 +169,12 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
   const booksRef = useRef<SourceBook[]>([]);
   const runningRef = useRef(false);
   /**
-   * 用户点过「继续搜索」后置位，本轮不再受 hasEnough 约束。
-   * 不然清掉 satisfied 重启循环，第一批回来 hasEnough 依旧成立，又立刻停住。
+   * 自动阶段最多 3 批；「继续」每次只授权 1 批。这里宁可让用户多点一次，
+   * 也不能把几十个出站请求串成一次长任务 —— 那正是 Error 1102 的来源。
    */
-  const keepGoingRef = useRef(false);
+  const autoBatchesRef = useRef(3);
+  const manualBatchesRef = useRef(0);
+  const batchCooldownMs = 1_200;
 
   // 换关键词时重置，避免上一次的结果串到下一次
   useEffect(() => {
@@ -187,7 +189,8 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
     pausedRef.current = false;
     offsetRef.current = 0;
     booksRef.current = [];
-    keepGoingRef.current = false;
+    autoBatchesRef.current = 3;
+    manualBatchesRef.current = 0;
   }, [query]);
 
   const loadBatch = useCallback(
@@ -200,7 +203,11 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
         );
         const data = (await response.json()) as BatchResponse;
         if (!response.ok) {
-          setError(data.error ?? "在线源搜索失败");
+          setError(
+            response.status === 429 || response.status >= 500
+              ? "源查询触发限流或源站过载，已暂停；稍后可点「继续下一批」"
+              : data.error ?? "在线源搜索失败"
+          );
           setNextOffset(null);
           return null;
         }
@@ -223,15 +230,6 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
     [query]
   );
 
-  /**
-   * 一直往下查，直到搜够、源查完、出错，或用户按暂停。
-   *
-   * 不再有轮数上限，也不需要用户点「继续搜索」—— 原先两者叠在一起：
-   * 多数关键字在前 8 个源里搜不到，自动查 6 轮就停手，剩下的全靠手点。
-   *
-   * 停止条件是「用户要的那本书攒够 5 个源」（见 hasEnough），
-   * 凑不够就继续打剩下的源，要停由用户自己决定。
-   */
   const cancelledRef = useRef(false);
   const runLoop = useCallback(async () => {
     // 同一时刻只允许一个循环在跑，避免暂停/恢复连点跑出两条
@@ -249,11 +247,19 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
           return;
         }
         offsetRef.current = result.next;
-        if (!keepGoingRef.current && hasEnough(booksRef.current)) {
-          // 搜够就暂停，但保留「继续搜索」的余地 —— 不当作查完
+        if (manualBatchesRef.current > 0) {
+          manualBatchesRef.current -= 1;
           setSatisfied(true);
           return;
         }
+        if (hasEnough(booksRef.current) || autoBatchesRef.current <= 0) {
+          // 搜够或到达自动预算就暂停，保留手动「继续下一批」的余地
+          setSatisfied(true);
+          return;
+        }
+        autoBatchesRef.current -= 1;
+        await new Promise((resolve) => setTimeout(resolve, batchCooldownMs));
+        if (cancelledRef.current || pausedRef.current) return;
       }
     } finally {
       runningRef.current = false;
@@ -274,6 +280,7 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
     if (paused) {
       setPaused(false);
       pausedRef.current = false;
+      autoBatchesRef.current = Math.max(autoBatchesRef.current, 1);
       void runLoop();
       return;
     }
@@ -282,14 +289,15 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
   }
 
   /**
-   * 搜够之后继续往下查剩余的源。
+   * 每次只继续一批。连续搜索最容易撞 Worker 资源上限；
+   * 用户看到结果后自己决定是否花下一批配额。
    *
    * 用途很实际：命中的那几个源可能有 403/503/超时打不开，得再找几条备用线路。
    * 清掉 satisfied 再启动循环 —— 否则 hasEnough 仍然成立，会立刻又停下。
    */
   function continueSearch() {
     setSatisfied(false);
-    keepGoingRef.current = true;
+    manualBatchesRef.current = 1;
     void runLoop();
   }
 
@@ -333,7 +341,7 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
             onClick={continueSearch}
           >
             <Play className="size-3.5" />
-            继续搜索
+            继续下一批
           </Button>
         )}
 

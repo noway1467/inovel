@@ -180,6 +180,38 @@ describe("目录分页", () => {
   });
 });
 
+describe("详情页完整目录入口", () => {
+  it("不能把“最新 9 章”当全书；必须跟“完整目录”入口后再择优", async () => {
+    const latest = Array.from({ length: 9 }, (_, i) =>
+      `<li><a href="/book/1/p${1000 - i}.html">第${1000 - i}章 最新</a></li>`
+    ).join("");
+    responses.set(
+      "https://novels.example.org/book/1",
+      `<html><body><ul class="latest">${latest}</ul>` +
+        `<a href="/book/1/catalog">完整目录</a></body></html>`
+    );
+    responses.set(
+      "https://novels.example.org/book/1/catalog",
+      `<html><body><ul>${Array.from(
+        { length: 80 },
+        (_, i) => `<li><a href="/book/1/p${i + 1}.html">第${i + 1}章</a></li>`
+      ).join("")}</ul></body></html>`
+    );
+
+    const chapters = await rulesAdapter.listChapters(
+      ctxWith({ ...baseConfig, tocMode: "detect", tocList: null, tocName: null, tocUrl: null }),
+      { externalId: "https://novels.example.org/book/1" }
+    );
+
+    expect(chapters).toHaveLength(80);
+    expect(chapters[0]!.title).toBe("第1章");
+    expect(requestLog).toEqual([
+      "https://novels.example.org/book/1",
+      "https://novels.example.org/book/1/catalog",
+    ]);
+  });
+});
+
 describe("正文分页", () => {
   const content = (text: string, next = "") =>
     `<html><body><div id="content"><p>${text}</p></div>${next}</body></html>`;
@@ -241,4 +273,3 @@ describe("正文分页", () => {
     ).rejects.toThrow();
   });
 });
-

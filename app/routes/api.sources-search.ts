@@ -38,8 +38,8 @@ export async function loader({ request, context }: Route.LoaderArgs) {
     const result = await aggregateSearch(db, keyword, {
       offset,
       maxSources,
-      perSourceLimit: 5,
-      timeoutMs: 8_000,
+      perSourceLimit: 3,
+      timeoutMs: 6_000,
     });
     return Response.json(result);
   } catch (error) {

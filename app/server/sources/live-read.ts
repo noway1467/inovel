@@ -36,8 +36,10 @@ const contentCacheTtlMs = 7 * 24 * 60 * 60 * 1000;
  *     文字与一堆假章节
  * v6: 支持 POST 目录接口（源站「完整目录」按钮），旧缓存里只有详情页刮到的
  *     最新几章
+ * v7: 目录探测按章节序号排序，并保留 title/alt 里的源站标题；
+ *     旧缓存保存了“最新章节块”的倒序/缺序结果
  */
-const pipelineVersion = "v6";
+const pipelineVersion = "v7";
 
 /** 源地址不能直接当 R2 键（含协议与斜杠），用摘要 */
 async function keyHash(value: string): Promise<string> {

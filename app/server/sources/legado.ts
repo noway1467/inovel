@@ -3,6 +3,13 @@ import { splitUrlAndOptions, templateIsSupported } from "~/server/sources/url-op
 import { isSupportedAjaxRule } from "~/server/sources/java-ajax";
 
 /**
+ * v3: JSON 目录数组展开、目录/正文分页兜底、POST 目录选项、
+ *     扁平格式、净化规则、java.ajax 与全局 header。
+ * 修改转换器能力时递增，让老配置能在重新导入时升级。
+ */
+export const currentConverterVersion = 3;
+
+/**
  * 开源阅读（Legado）书源 JSON → 内部规则配置。
  *
  * 只做格式转换与可行性校验，不内置任何现成书源：域名仍要逐个过
@@ -13,6 +20,11 @@ import { isSupportedAjaxRule } from "~/server/sources/java-ajax";
  */
 
 export interface RulesConfig {
+  /**
+   * 导入器能力版本。老版本导入的源缺这个字段；同地址重新导入时，
+   * 新版转换结果可以覆盖旧配置，而不是被“已存在”直接复用。
+   */
+  converterVersion?: number;
   /** 书籍详情页/目录页地址模板，{{key}} 为搜索关键字占位 */
   searchUrl?: string | null;
   /** 搜索结果列表规则 */
@@ -544,6 +556,7 @@ export function convertLegadoSource(raw: unknown): ConversionResult {
      */
     contentReplaceRegex: clean(source.ruleContent?.replaceRegex),
     baseUrl: endpoint,
+    converterVersion: currentConverterVersion,
     headers,
 
     /**

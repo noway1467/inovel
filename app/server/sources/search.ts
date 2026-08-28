@@ -14,7 +14,7 @@ import type { SourceBook } from "~/server/sources/types";
  */
 
 /** 同时进行的源查询数上限 */
-const searchConcurrency = 6;
+const searchConcurrency = 3;
 /** 单个源的查询时限；超过就放弃该源 */
 export const perSourceTimeoutMs = 12_000;
 /** 每个源最多取几条，防止某个源刷屏 */
@@ -190,7 +190,7 @@ export interface AggregateSearchOptions {
  * 每个源一次出站 + 一份 HTML 解析，解析是 CPU 密集的。
  * 8 个是实测下来既能出结果、又稳定不超限的值。
  */
-export const maxSourcesPerSearch = 8;
+export const maxSourcesPerSearch = 4;
 
 export async function aggregateSearch(
   db: AppDb,

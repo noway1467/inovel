@@ -8,6 +8,7 @@ import {
 import {
   applyTemplate,
   parseRequestOptions,
+  templateIsSupported,
   splitUrlAndOptions,
   type VarStore,
 } from "~/server/sources/url-options";
@@ -52,12 +53,6 @@ import {
  */
 const maxTocPages = 30;
 const maxContentPages = 20;
-
-/**
- * 探测结果达到这个数才认为「这页就是目录」，否则再去找目录页。
- * 与 toc-detect 里认定目录容器的最小链接数一致。
- */
-const minDetectedChapters = 5;
 
 /**
  * 求下一页地址。
@@ -128,11 +123,10 @@ async function detectWithTocHop(
   const doc = await loadDoc(ctx, pageUrl);
   const here = detectOnDoc(doc, pageUrl);
   /**
-   * 结果够厚就不必再跳。阈值取 5，与探测器认定「这是个目录容器」的
-   * 最小链接数一致：详情页上认出的三五条多是换源站点链接，不是章节。
+   * 不能因为“已经认出 5 条”就提前返回。详情页常见形态是先放
+   * 「最新 9 章」，真正的「完整目录 / 全部章节」入口在后面；
+   * 提前返回会把预告块当成全书。必须先找目录入口，跟过去后择优。
    */
-  if (here.length >= minDetectedChapters) return here;
-
   if (doc.kind !== "html") return here;
   const tocPage = detectTocPageUrl(doc.node, pageUrl);
   if (!tocPage) return here;
@@ -174,7 +168,17 @@ function sourceHeaders(config: Record<string, unknown>): Record<string, string> 
 function readConfig(config: Record<string, unknown>): RulesConfig {
   const tocList = usableRule(config.tocList);
   const tocName = usableRule(config.tocName);
-  const tocUrl = usableRule(config.tocUrl);
+  const rawTocUrl = typeof config.tocUrl === "string" ? config.tocUrl : null;
+  /**
+   * tocUrl 有两种合法形态：选择器可求值；或“地址模板 + 请求选项”。
+   * 后者本来就含 {{}}/@get，不能按选择器标准降级，否则 POST 目录
+   * 会在导入时保存成功、读取时又退回详情页探测。
+   */
+  const tocUrl =
+    usableRule(config.tocUrl) ??
+    (rawTocUrl && /(@get:\{|\{\{\s*\$\.)/.test(rawTocUrl) && templateIsSupported(rawTocUrl)
+      ? rawTocUrl
+      : null);
   const rawContent = typeof config.contentRule === "string" ? config.contentRule : null;
   const contentRule = isSupportedAjaxRule(rawContent) ? rawContent! : usableRule(config.contentRule);
   if (!contentRule) {

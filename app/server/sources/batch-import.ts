@@ -1,3 +1,4 @@
+import { eq } from "drizzle-orm";
 import { contentSources } from "drizzle/schema";
 import type { AppDb } from "~/server/db";
 import { normalizeEndpoint } from "~/server/sources/fetch-guard";
@@ -49,12 +50,52 @@ export interface BatchImportResult {
  * 加上建源的 600 次，单请求 1200 次往返 —— 这是导入偶发 Error 1102
  * （Worker 资源超限）的主要来源。一次查完在内存里比对，往返降到 1 次。
  */
-async function loadEndpointIndex(db: AppDb): Promise<Map<string, string>> {
+interface EndpointRecord {
+  id: string;
+  endpoint: string;
+  config: Record<string, unknown> | null;
+}
+
+async function loadEndpointIndex(db: AppDb): Promise<Map<string, EndpointRecord>> {
   const rows = await db
-    .select({ id: contentSources.id, endpoint: contentSources.endpoint })
+    .select({
+      id: contentSources.id,
+      endpoint: contentSources.endpoint,
+      config: contentSources.config,
+    })
     .from(contentSources)
     .all();
-  return new Map(rows.map((row) => [row.endpoint, row.id]));
+  return new Map(rows.map((row) => [row.endpoint, row as EndpointRecord]));
+}
+
+function converterVersion(config: Record<string, unknown> | null): number {
+  const value = config?.converterVersion;
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+/**
+ * 同地址不重复建源，但不能永远锁死在旧转换结果上。
+ * 转换器能力会增强（POST 目录、编码、请求头等）；老记录缺版本号或版本更低时，
+ * 重新导入同一份阅读清单就是安全的升级路径。状态和订阅不动，只换规则配置。
+ */
+async function upgradeExistingSource(
+  db: AppDb,
+  existing: EndpointRecord,
+  incoming: PendingSource
+): Promise<boolean> {
+  if (incoming.kind !== "rules" || !incoming.config) return false;
+  if (converterVersion(incoming.config) <= converterVersion(existing.config)) return false;
+
+  await db
+    .update(contentSources)
+    .set({
+      name: incoming.name.slice(0, 100),
+      config: incoming.config,
+      searchWeight: incoming.weight,
+      updatedAt: new Date(),
+    })
+    .where(eq(contentSources.id, existing.id));
+  return true;
 }
 
 interface PendingSource {
@@ -169,9 +210,10 @@ export async function batchImportSources(
       // 同地址的源复用，反复导入同一清单不会堆出重复行与重复同步计划。
       // 查已有源的索引一次性载入（见 loadEndpointIndex），这里只查内存。
       const normalized = normalizeEndpoint(item.endpoint);
-      const existingId = normalized ? endpointIndex.get(normalized) : undefined;
-      if (existingId) {
-        reused.push({ name: item.name, sourceId: existingId });
+      const existing = normalized ? endpointIndex.get(normalized) : undefined;
+      if (existing) {
+        await upgradeExistingSource(db, existing, item);
+        reused.push({ name: item.name, sourceId: existing.id });
         countDegrade();
         continue;
       }
@@ -192,7 +234,13 @@ export async function batchImportSources(
         status: result.status,
       });
       // 新建的也进索引：同一份清单里出现两条相同地址时，第二条才会走复用分支
-      if (normalized) endpointIndex.set(normalized, result.id);
+      if (normalized) {
+        endpointIndex.set(normalized, {
+          id: result.id,
+          endpoint: normalized,
+          config: item.config,
+        });
+      }
       countDegrade();
     } catch {
       // 建不起来的源直接丢，不打断整批
