@@ -1,0 +1,43 @@
+{
+  "code": 0,
+  "index": 0,
+  "pages": 2,
+  "size": 0,
+  "total": 1683,
+  "items": [
+    {
+      "articlename": "斗破苍穹",
+      "articleno": 99,
+      "chaptername": "第九百七十一章 白狐引起的血案",
+      "chapterno": 3674689,
+      "chaptertype": 0,
+      "deleteflag": false,
+      "infoUrl": "/info/0/99.html",
+      "isvip": false,
+      "modifytime": "2017-12-19T12:26:31",
+      "postdate": "2017-12-19T12:26:31",
+      "publishtime": "2017-12-19T12:26:31",
+      "size": 4208,
+      "subdir": 0,
+      "thumbnailUrl": "/reader?chapterno=3674689",
+      "url": "/reader/0/99/3674689.html"
+    },
+    {
+      "articlename": "斗破苍穹",
+      "articleno": 99,
+      "chaptername": "第九百七十二章 天山台",
+      "chapterno": 3674690,
+      "chaptertype": 0,
+      "deleteflag": false,
+      "infoUrl": "/info/0/99.html",
+      "isvip": false,
+      "modifytime": "2017-12-19T12:26:31",
+      "postdate": "2017-12-19T12:26:31",
+      "publishtime": "2017-12-19T12:26:31",
+      "size": 4118,
+      "subdir": 0,
+      "thumbnailUrl": "/reader?chapterno=3674690",
+      "url": "/reader/0/99/3674690.html"
+    }
+  ]
+}

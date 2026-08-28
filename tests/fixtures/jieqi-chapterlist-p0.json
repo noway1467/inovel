@@ -1,0 +1,60 @@
+{
+  "code": 0,
+  "index": 0,
+  "pages": 2,
+  "size": 0,
+  "total": 1683,
+  "items": [
+    {
+      "articlename": "斗破苍穹",
+      "articleno": 99,
+      "chaptername": "第一章 陨落的天才",
+      "chapterno": 3673687,
+      "chaptertype": 0,
+      "deleteflag": false,
+      "infoUrl": "/info/0/99.html",
+      "isvip": false,
+      "modifytime": "2017-12-19T12:26:31",
+      "postdate": "2017-12-19T12:26:31",
+      "publishtime": "2017-12-19T12:26:31",
+      "size": 4414,
+      "subdir": 0,
+      "thumbnailUrl": "/reader?chapterno=3673687",
+      "url": "/reader/0/99/3673687.html"
+    },
+    {
+      "articlename": "斗破苍穹",
+      "articleno": 99,
+      "chaptername": "第二章 斗气大陆",
+      "chapterno": 3673688,
+      "chaptertype": 0,
+      "deleteflag": false,
+      "infoUrl": "/info/0/99.html",
+      "isvip": false,
+      "modifytime": "2017-12-19T12:26:31",
+      "postdate": "2017-12-19T12:26:31",
+      "publishtime": "2017-12-19T12:26:31",
+      "size": 5534,
+      "subdir": 0,
+      "thumbnailUrl": "/reader?chapterno=3673688",
+      "url": "/reader/0/99/3673688.html"
+    },
+    {
+      "articlename": "斗破苍穹",
+      "articleno": 99,
+      "chaptername": "第三章 客人",
+      "chapterno": 3673689,
+      "chaptertype": 0,
+      "deleteflag": false,
+      "infoUrl": "/info/0/99.html",
+      "isvip": false,
+      "modifytime": "2017-12-19T12:26:31",
+      "postdate": "2017-12-19T12:26:31",
+      "publishtime": "2017-12-19T12:26:31",
+      "size": 4080,
+      "subdir": 0,
+      "thumbnailUrl": "/reader?chapterno=3673689",
+      "url": "/reader/0/99/3673689.html"
+    }
+  ]
+}

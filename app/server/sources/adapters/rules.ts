@@ -39,6 +39,7 @@ import {
   detectObfuscatedChapters,
   detectTocPageUrl,
 } from "~/server/sources/toc-detect";
+import { detectJieqiArticleNo, fetchJieqiToc } from "~/server/sources/jieqi-toc";
 
 /**
  * 通用 CSS 规则引擎适配器，消费 legado.ts 转换出的 RulesConfig。
@@ -120,8 +121,13 @@ async function detectWithTocHop(
   ctx: Parameters<SourceAdapter["listChapters"]>[0],
   pageUrl: string
 ): Promise<SourceChapter[]> {
-  const doc = await loadDoc(ctx, pageUrl);
+  const { doc, body } = await loadDocRaw(ctx, pageUrl);
   const here = detectOnDoc(doc, pageUrl);
+
+  // 杰奇的完整目录只能从接口取，页面上永远只有第一页
+  const viaJieqi = await tryJieqiToc(ctx, pageUrl, body);
+  if (viaJieqi.length > here.length) return viaJieqi;
+
   /**
    * 不能因为“已经认出 5 条”就提前返回。详情页常见形态是先放
    * 「最新 9 章」，真正的「完整目录 / 全部章节」入口在后面；
@@ -134,6 +140,31 @@ async function detectWithTocHop(
   await delay(politeDelayMs);
   const hopped = await detectFromPage(ctx, tocPage);
   return hopped.length > here.length ? hopped : here;
+}
+
+/**
+ * 试杰奇（jieqi）CMS 的完整目录接口，不是这套模板就返回空数组。
+ *
+ * 先用正则判型再决定要不要发请求，所以对其他站没有额外开销。
+ */
+async function tryJieqiToc(
+  ctx: Parameters<SourceAdapter["listChapters"]>[0],
+  pageUrl: string,
+  html: string
+): Promise<SourceChapter[]> {
+  if (!detectJieqiArticleNo(html, pageUrl)) return [];
+  try {
+    return await fetchJieqiToc(html, pageUrl, async (url) => {
+      await delay(paginationDelayMs);
+      const response = await loadResponse(ctx, url, {
+        headers: { "X-Requested-With": "XMLHttpRequest", Referer: pageUrl },
+      });
+      return response.body;
+    });
+  } catch {
+    // 判型对了但接口打不通，交回上层继续走探测
+    return [];
+  }
 }
 
 /**
@@ -243,18 +274,33 @@ async function loadDoc(
   url: string,
   init?: GuardedFetchInit
 ): Promise<RuleDoc> {
+  return (await loadDocRaw(ctx, url, init)).doc;
+}
+
+/**
+ * 同 loadDoc，另外把原文一并给出。
+ *
+ * 目录探测需要原文：杰奇那类接口的线索（`allchapter(99,2)`、`/ajaxService`）
+ * 藏在 `<script>` 和 onclick 属性里，解析成 DOM 后按元素找不回来，
+ * 用正则在原文上认最省事，也不必为此多抓一次页面。
+ */
+async function loadDocRaw(
+  ctx: Parameters<SourceAdapter["listBooks"]>[0],
+  url: string,
+  init?: GuardedFetchInit
+): Promise<{ doc: RuleDoc; body: string }> {
   const { body, contentType } = await loadResponse(ctx, url, init);
   const trimmed = body.trimStart();
   const looksJson =
     contentType.includes("json") || trimmed.startsWith("{") || trimmed.startsWith("[");
   if (looksJson) {
     try {
-      return jsonDoc(JSON.parse(body));
+      return { doc: jsonDoc(JSON.parse(body)), body };
     } catch {
       // 声明是 JSON 但解析失败时退回 HTML，比直接报错更宽容
     }
   }
-  return htmlDoc(parseHtml(body));
+  return { doc: htmlDoc(parseHtml(body)), body };
 }
 
 /** 目录页可能与详情页不同，按 infoTocUrl 规则跳转一次 */
@@ -418,6 +464,8 @@ export const rulesAdapter: SourceAdapter = {
     const visited = new Set<string>();
     let pageUrl: string | null = firstUrl;
     let pages = 0;
+    /** 首页原文，留给下面判杰奇用 */
+    let firstBody = "";
 
     while (pageUrl && pages < maxTocPages) {
       if (visited.has(pageUrl)) break;
@@ -425,7 +473,9 @@ export const rulesAdapter: SourceAdapter = {
       pages += 1;
 
       // 第一页可能是 POST（目录接口）；后续分页一律 GET
-      const doc = await loadDoc(ctx, pageUrl, pages === 1 ? tocRequest.init : undefined);
+      const loaded = await loadDocRaw(ctx, pageUrl, pages === 1 ? tocRequest.init : undefined);
+      const doc = loaded.doc;
+      if (pages === 1) firstBody = loaded.body;
 
       /**
        * 章节地址两种取法：
@@ -463,7 +513,14 @@ export const rulesAdapter: SourceAdapter = {
       if (pageUrl) await delay(paginationDelayMs);
     }
 
-    if (chapters.length > 0) return chapters;
+    /**
+     * 规则取到了，但杰奇站上"取到了"往往只是第一页 10 条 —— 规则本身没错，
+     * 是翻页按钮为纯 JS，规则和通用分页探测都跟不过去。接口能给全本时用接口。
+     */
+    if (chapters.length > 0) {
+      const viaJieqi = await tryJieqiToc(ctx, firstUrl, firstBody);
+      return viaJieqi.length > chapters.length ? viaJieqi : chapters;
+    }
 
     /**
      * 目录规则一无所获时，改用通用目录探测：直接从页面结构认出章节列表。

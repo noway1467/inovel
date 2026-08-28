@@ -1,0 +1,49 @@
+<!--
+  杰奇（jieqi）CMS 详情页的结构骨架，取自 m.95dxs.com/info/0/99.html。
+
+  要点：
+   - 「全部章节」只渲染第一页 10 条
+   - 翻页是纯 JS：onclick="allchapter(99,2)"，没有 href，
+     所以通用分页探测（只看 <a href>）对它无解
+   - 页码本身也是 onclick，按数字分页器认同样不行
+   - 页面上不出现接口地址本身 —— 它在外部 wap.js 里，
+     所以判型只能靠 onclick 调用和分页容器 id
+-->
+<html>
+  <head><title>斗破苍穹最新章节</title></head>
+  <body>
+    <div class="block_txt2">
+      <h2><a href="/info/0/99.html">斗破苍穹</a></h2>
+      <p>作者：天蚕土豆</p>
+    </div>
+
+    <div id="chapterlist">
+      <p class="title">全部章节</p>
+      <ul>
+        <li><a href="/reader/0/99/3673687.html">第一章 陨落的天才</a></li>
+        <li><a href="/reader/0/99/3673688.html">第二章 斗气大陆</a></li>
+        <li><a href="/reader/0/99/3673689.html">第三章 客人</a></li>
+        <li><a href="/reader/0/99/3673690.html">第四章 云岚宗</a></li>
+        <li><a href="/reader/0/99/3673691.html">第五章 聚气散</a></li>
+        <li><a href="/reader/0/99/3673692.html">第六章 炼药师</a></li>
+        <li><a href="/reader/0/99/3673693.html">第七章 休！</a></li>
+        <li><a href="/reader/0/99/3673694.html">第八章 神秘的老者</a></li>
+        <li><a href="/reader/0/99/3673695.html">第九章 药老！</a></li>
+        <li><a href="/reader/0/99/3673696.html">第十章 借钱</a></li>
+      </ul>
+    </div>
+
+    <div style="background-color:#F4F4F4;">
+      <table id="allchapter_2" cellpadding="0" cellspacing="0"><tbody><tr>
+        <td><a>第1/168页</a></td>
+        <td><a onclick="allchapter(99,1)" id ="prepage">上页</a></td>
+        <td><a onclick="allchapter(99,2)" id ="nextpage">下页</a></td>
+        <td><a onclick="allchapter(99,168)">尾页</a></td>
+        <td><input id="pagenum" type="text" /></td>
+        <td><a onclick="allchapter(99,&quot;gopage&quot;)">确定</a></td>
+      </tr></tbody></table>
+    </div>
+
+    <script src="/js/wap.js"></script>
+  </body>
+</html>
