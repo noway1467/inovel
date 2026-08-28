@@ -10,7 +10,7 @@ import { Input } from "~/components/ui/input";
 import { EmptyState } from "~/components/state/empty-state";
 import { eq, sql } from "drizzle-orm";
 import { encodeSourceRef } from "~/lib/source-ref";
-import { groupKey, preciseRelevance } from "~/lib/book-match";
+import { bestPreciseSourceCount, groupKey } from "~/lib/book-match";
 import { contentSources } from "drizzle/schema";
 import { cloudflareContext } from "~/server/context";
 import { createDb } from "~/server/db";
@@ -101,6 +101,8 @@ interface BatchResponse {
  * 判据是「同一本书有几个源」而不是「一共搜到几本」：用户要的是这一本，
  * 多个源只是备用线路，够 5 条就不必再打剩下的源了。凑不够就一直往下查，
  * 由用户手动暂停 —— 原先攒到 5 本任意书就停，常常那 5 本都不是想搜的。
+ *
+ * 也是「继续搜索」每次抬高目标的步长：点一次再攒 5 个。
  */
 const enoughSourcesForOneBook = 5;
 
@@ -156,11 +158,9 @@ function mergeBooks(prev: SourceBook[], incoming: SourceBook[]): SourceBook[] {
   );
 }
 
-/** 是否已经把用户要的那本书搜够了 */
-function hasEnough(books: SourceBook[]): boolean {
-  return books.some(
-    (book) => book.relevance >= preciseRelevance && book.options.length >= enoughSourcesForOneBook
-  );
+/** 是否已攒到目标个数的精准源 */
+function hasEnough(books: SourceBook[], target: number): boolean {
+  return bestPreciseSourceCount(books) >= target;
 }
 
 function SourceResults({ query, sourceCount }: { query: string; sourceCount: number }) {
@@ -181,6 +181,14 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
    */
   const [satisfied, setSatisfied] = useState(false);
   const [error, setError] = useState("");
+  /**
+   * 当前这一轮要攒够几个精准源。
+   *
+   * 每点一次「继续搜索」就再加 5：点继续的实际场景是手里那几个源打不开
+   * （403/503/超时），需要的是"再来 5 条备用线路"，不是把已有的 5 条重数一遍。
+   * 不加的话 hasEnough 立刻又成立，循环刚起步就停。
+   */
+  const [target, setTarget] = useState(enoughSourcesForOneBook);
 
   // 循环靠 ref 读取暂停状态与进度：state 要等重渲染才可见，循环里读不到
   const pausedRef = useRef(false);
@@ -188,7 +196,7 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
   const booksRef = useRef<SourceBook[]>([]);
   const runningRef = useRef(false);
   const autoBatchesRef = useRef(maxAutoBatches);
-  const manualBatchesRef = useRef(0);
+  const targetRef = useRef(enoughSourcesForOneBook);
   const batchCooldownMs = 1_200;
 
   // 换关键词时重置，避免上一次的结果串到下一次
@@ -201,11 +209,12 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
     setDone(false);
     setSatisfied(false);
     setError("");
+    setTarget(enoughSourcesForOneBook);
     pausedRef.current = false;
     offsetRef.current = 0;
     booksRef.current = [];
     autoBatchesRef.current = maxAutoBatches;
-    manualBatchesRef.current = 0;
+    targetRef.current = enoughSourcesForOneBook;
   }, [query]);
 
   const loadBatch = useCallback(
@@ -262,13 +271,8 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
           return;
         }
         offsetRef.current = result.next;
-        if (manualBatchesRef.current > 0) {
-          manualBatchesRef.current -= 1;
-          setSatisfied(true);
-          return;
-        }
-        if (hasEnough(booksRef.current) || autoBatchesRef.current <= 0) {
-          // 搜够或到达自动预算就暂停，保留手动「继续下一批」的余地
+        if (hasEnough(booksRef.current, targetRef.current) || autoBatchesRef.current <= 0) {
+          // 搜够或到达批次上限就停，保留手动「继续搜索」的余地
           setSatisfied(true);
           return;
         }
@@ -295,7 +299,12 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
     if (paused) {
       setPaused(false);
       pausedRef.current = false;
-      autoBatchesRef.current = Math.max(autoBatchesRef.current, 1);
+      /*
+        恢复时把批次预算补满。暂停是用户的动作、不是配额事件，
+        原先只补到 1 —— 若暂停前预算已见底，一恢复就跑一批又停，
+        看着像"点了继续没反应"。
+      */
+      autoBatchesRef.current = Math.max(autoBatchesRef.current, maxAutoBatches);
       void runLoop();
       return;
     }
@@ -304,15 +313,22 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
   }
 
   /**
-   * 每次只继续一批。连续搜索最容易撞 Worker 资源上限；
-   * 用户看到结果后自己决定是否花下一批配额。
+   * 继续搜索：把目标再抬 5 个精准源，然后按和自动阶段一样的规则继续跑。
    *
-   * 用途很实际：命中的那几个源可能有 403/503/超时打不开，得再找几条备用线路。
-   * 清掉 satisfied 再启动循环 —— 否则 hasEnough 仍然成立，会立刻又停下。
+   * 原先固定只跑一批就停。每批服务端封顶 4 个源，等于点一次只多查 4 个 ——
+   * 想凑够备用线路得连点十几次，而每次点完还得等它自己停下。现在用同一把
+   * 尺子：攒满目标、源查完、或用户按暂停才停。
+   *
+   * 预算也要补回来：若上一轮是撞批次上限停的（autoBatches 见底），
+   * 不补的话循环第一批跑完就又被判成到顶。
    */
   function continueSearch() {
+    targetRef.current = bestPreciseSourceCount(booksRef.current) + enoughSourcesForOneBook;
+    setTarget(targetRef.current);
+    autoBatchesRef.current = Math.max(autoBatchesRef.current, maxAutoBatches);
     setSatisfied(false);
-    manualBatchesRef.current = 1;
+    pausedRef.current = false;
+    setPaused(false);
     void runLoop();
   }
 
@@ -330,6 +346,13 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
   const running = loading || (!paused && !done && !satisfied && nextOffset !== null);
   /** 还有源没查完，且当前是停着的 —— 这时才给「继续搜索」 */
   const canContinue = satisfied && nextOffset !== null && !loading;
+  /**
+   * 暂停按钮的显示条件。
+   *
+   * 只要还有源没查完、且不是停在 satisfied 上，就该给暂停 ——
+   * 包括「继续搜索」跑起来之后：那一段现在也是循环，同样得能中途叫停。
+   */
+  const canPause = nextOffset !== null && !done && !satisfied;
 
   return (
     <section>
@@ -350,15 +373,15 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
             : done
               ? " · 已查完"
               : satisfied
-                ? hasEnough(books)
-                  ? " · 已够用"
+                ? hasEnough(books, target)
+                  ? ` · 已够用（${bestPreciseSourceCount(books)} 个精准源）`
                   : " · 已暂停"
                 : ""}
         </span>
 
         {/*
           搜够但还有源没查时给「继续搜索」：命中的那几个源可能 403/503/超时
-          打不开，需要再找几条备用线路。
+          打不开，需要再找几条备用线路。点下去按同样的规则再攒 5 个。
         */}
         {canContinue && (
           <Button
@@ -368,11 +391,11 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
             onClick={continueSearch}
           >
             <Play className="size-3.5" />
-            继续下一批
+            继续搜索
           </Button>
         )}
 
-        {nextOffset !== null && !done && !satisfied && (
+        {canPause && (
           <Button variant="ghost" size="sm" className="h-7 shrink-0 px-2" onClick={togglePause}>
             {paused ? (
               <>

@@ -69,6 +69,26 @@ export function keywordRelevance(
   return 0;
 }
 
+/**
+ * 精准命中的书里，源最多的那本有几个源。
+ *
+ * 这是搜索停止条件的唯一判据：用户要的是这一本，多个源只是备用线路。
+ * 单独拆出来是因为「继续搜索」也要用同一把尺子 —— 原先自动阶段按
+ * 「攒够 5 个精准源」停，而继续搜索只固定跑一批就停，两条路两套规则，
+ * 点了继续往往只多查 4 个源、一个都没攒上就又停住了。
+ */
+export function bestPreciseSourceCount(
+  books: { relevance: number; options: unknown[] }[]
+): number {
+  let best = 0;
+  for (const book of books) {
+    if (book.relevance >= preciseRelevance && book.options.length > best) {
+      best = book.options.length;
+    }
+  }
+  return best;
+}
+
 /** 是否值得留下来展示。相关度 > 0 即可，排序交给 keywordRelevance。 */
 export function matchesKeyword(
   book: { title: string; author?: string | null },
