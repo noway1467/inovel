@@ -520,9 +520,44 @@ interface Candidate {
   score: number;
 }
 
-/** 收集容器内的直接链接（含其后代 a，但不跨越嵌套的候选容器） */
-function collectLinks(container: XmlNode): { title: string; href: string }[] {
-  const links: { title: string; href: string }[] = [];
+/**
+ * 「最新章节」小标题的文字。命中它之后的链接要丢掉。
+ *
+ * 这是详情页/目录页的标准配件：源站在正文目录之上再挂一份"最近更新的 N 章"
+ * 方便老读者跳转。对我们却是纯负担 —— 那几条与正文目录完全重复，
+ * 且是倒序的，混进目录后既把排版搞乱，又让同一章出现两次。
+ */
+const latestSectionTexts = [
+  "最新章节",
+  "最新更新",
+  "最近更新",
+  "最新章",
+  "最近章节",
+  "latest chapter",
+  "recent chapter",
+];
+
+/** 「全部章节」小标题：命中它说明最新章节块结束了，后面才是真目录。 */
+const fullSectionTexts = ["全部章节", "完整目录", "章节目录", "章节列表", "正文", "目录", "all chapter"];
+
+function matchesSection(text: string, words: string[]): boolean {
+  const lower = text.toLowerCase();
+  return words.some((word) => lower.includes(word.toLowerCase()));
+}
+
+/**
+ * 收集容器内的直接链接（含其后代 a，但不跨越嵌套的候选容器）。
+ *
+ * 按 DOM 顺序走，并顺带认出「最新章节」小标题：命中之后的链接标成 skip，
+ * 直到遇见「全部章节」这类标题才恢复。kxdu 那类站把两块塞在同一个 `<ul>` 里
+ * （`<h1>最新章节</h1>` + 9 条倒序 + `<h1>全部章节</h1>` + 1683 条正序），
+ * 不分区就会把倒序那 9 条混进目录 —— 它们与正文目录重复，排序后还会插到
+ * 第 5~15 章之间，同一章出现两次。
+ */
+function collectLinks(container: XmlNode): { title: string; href: string; skip: boolean }[] {
+  const links: { title: string; href: string; skip: boolean }[] = [];
+  let inLatest = false;
+
   const walk = (node: XmlNode) => {
     for (const child of elementChildren(node)) {
       if (child.name === "a") {
@@ -536,14 +571,48 @@ function collectLinks(container: XmlNode): { title: string; href: string }[] {
           child.attrs["data-title"]?.trim() ||
           child.attrs["aria-label"]?.trim() ||
           "";
-        links.push({ title, href });
+        links.push({ title, href, skip: inLatest });
         continue;
+      }
+
+      /**
+       * 小标题的判据是「自己不含任何链接、文字很短」，而不是标签名。
+       * 各站写法差得很远：`<h1>`、`<dt>`、`<div class="top_t">`、`<span>` 都见过，
+       * 按标签名认必然漏。含链接的节点不算标题 —— 那是列表项本身。
+       */
+      const text = textOf(child).trim();
+      if (text && text.length <= 50 && !hasLink(child)) {
+        if (matchesSection(text, latestSectionTexts)) {
+          inLatest = true;
+          continue;
+        }
+        if (matchesSection(text, fullSectionTexts)) {
+          inLatest = false;
+          continue;
+        }
       }
       walk(child);
     }
   };
   walk(container);
-  return links;
+
+  /**
+   * 分区判断可能误伤：有的详情页只有「最新章节」一块，没有正文目录标题。
+   * 这时全丢会把目录清空，比留着重复条目更糟。所以只在「留下的仍是大头」
+   * 时才采用分区结果，否则退回全量，交给上层的「跳目录页」继续找。
+   */
+  const kept = links.filter((link) => !link.skip);
+  if (kept.length >= 5 && kept.length * 2 >= links.length) return kept;
+  return links.map((link) => ({ ...link, skip: false }));
+}
+
+/** 节点或其后代里是否有 <a>。用来区分「小标题」与「列表项」。 */
+function hasLink(node: XmlNode): boolean {
+  for (const child of elementChildren(node)) {
+    if (child.name === "a") return true;
+    if (hasLink(child)) return true;
+  }
+  return false;
 }
 
 /**
@@ -746,6 +815,25 @@ function sortDetectedChapters(chapters: DetectedChapter[]): DetectedChapter[] {
   }));
   const withNumber = numbered.filter((item) => item.number !== null);
   if (withNumber.length < 3 || withNumber.length < chapters.length * 0.6) return chapters;
+
+  /**
+   * DOM 顺序本来就对时不要重排。
+   *
+   * 长篇里「第N章」会重来：外传、番外、第二部都从第一章起编号，同一个序号
+   * 出现两三次是常态（斗破苍穹 1683 章里有 70 个重复序号）。这种页面按序号
+   * 排会把相隔上千章的同号章节拧在一起，正文顺序全乱 —— 而它的 DOM 顺序
+   * 恰恰是源站的真实顺序。
+   *
+   * 判据是相邻逆序对的比例：真正需要重排的「最新 N 章倒序在前」形态，
+   * 逆序密集（那一段每一步都在下降）；卷次重编号只在换卷处降一次，实测
+   * 1645 个相邻对里只有 14 处（0.85%）。10% 把两者分得很开。
+   */
+  const ordinals = withNumber.map((item) => item.number!);
+  let inversions = 0;
+  for (let i = 1; i < ordinals.length; i += 1) {
+    if (ordinals[i]! < ordinals[i - 1]!) inversions += 1;
+  }
+  if (ordinals.length > 1 && inversions / (ordinals.length - 1) < 0.1) return chapters;
 
   return numbered
     .sort((a, b) =>
