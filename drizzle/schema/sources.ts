@@ -176,6 +176,54 @@ export const sourceChapterLinks = sqliteTable(
   ]
 );
 
+export const sourceRepoStatus = {
+  active: "active",
+  paused: "paused",
+} as const;
+
+export type SourceRepoStatus = (typeof sourceRepoStatus)[keyof typeof sourceRepoStatus];
+
+/**
+ * 书源订阅（对应开源阅读的"书源订阅地址"）。
+ *
+ * 存的是一份**清单地址**，不是单个源。清单作者会持续修规则、加站点，
+ * 所以要按间隔重拉一次，把新增的源建起来、已有的按新规则升级。
+ *
+ * 与 source_subscriptions 的区别：那张表订的是"一本书"，这张订的是
+ * "一批源"。原先只有一次性的批量导入 —— 导完就断了联系，清单更新了
+ * 得手工再粘一遍地址，而书源失效是常态，这条路基本没人走。
+ */
+export const sourceRepos = sqliteTable(
+  "source_repos",
+  {
+    id: text("id").primaryKey(),
+    /** 展示名，取不到清单标题时回落成域名 */
+    name: text("name").notNull(),
+    /** 清单地址；支持 JSON 直链与 legado:// 之类的分享链接 */
+    url: text("url").notNull(),
+    status: text("status").notNull().default(sourceRepoStatus.active),
+    /** 重拉间隔（分钟），Cron 按此判断是否到期 */
+    syncIntervalMinutes: integer("sync_interval_minutes").notNull().default(1440),
+    lastSyncAt: integer("last_sync_at", { mode: "timestamp_ms" }),
+    /** ok / failed */
+    lastSyncStatus: text("last_sync_status"),
+    lastSyncMessage: text("last_sync_message"),
+    consecutiveFailures: integer("consecutive_failures").notNull().default(0),
+    /** 上次拉取的产出，给列表页显示"这份清单给了多少源" */
+    lastCreatedCount: integer("last_created_count").notNull().default(0),
+    lastUpdatedCount: integer("last_updated_count").notNull().default(0),
+    sourceCount: integer("source_count").notNull().default(0),
+    createdBy: text("created_by").references(() => users.id),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().defaultNow(),
+    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().defaultNow(),
+  },
+  (table) => [
+    // 同一个清单地址只留一行，重复添加走复用
+    uniqueIndex("source_repos_url_unique").on(table.url),
+    index("source_repos_due_idx").on(table.status, table.lastSyncAt),
+  ]
+);
+
 /** 每次同步的审计记录，排障与配额观测都靠它。 */
 export const sourceSyncRuns = sqliteTable(
   "source_sync_runs",

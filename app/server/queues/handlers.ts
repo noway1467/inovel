@@ -5,6 +5,7 @@ import type { AppDb } from "~/server/db";
 import { commitImportChunk, parseImportJob } from "~/server/imports/service";
 import { claimEvent, markEventFailed } from "~/server/queues/idempotency";
 import { createEnvelope, queueEventTypes, type QueueMessageEnvelope } from "~/server/queues/messages";
+import { syncRepo } from "~/server/sources/repos";
 import { fetchPendingChapters, syncSource } from "~/server/sources/sync";
 
 export interface QueueHandlerResult {
@@ -64,6 +65,17 @@ export async function handleQueueMessage(
         const payload = message.payload as { sourceId?: string } | undefined;
         if (!payload?.sourceId) throw new Error("SOURCE_SYNC_SOURCE payload.sourceId 缺失");
         await syncSource(db, queues.jobs, payload.sourceId, "cron");
+        break;
+      }
+      case "SOURCE_SYNC_REPO": {
+        const payload = message.payload as { repoId?: string } | undefined;
+        if (!payload?.repoId) throw new Error("SOURCE_SYNC_REPO payload.repoId 缺失");
+        /*
+          失败不抛错：syncRepo 自己把失败记进 source_repos（含连续失败次数，
+          用于退避）。往外抛会触发队列重试，等于对一个已经失效的清单地址
+          连撞几次 —— 记账已经完成，重试没有意义。
+        */
+        await syncRepo(db, payload.repoId, message.actorId ?? "cron");
         break;
       }
       case "SOURCE_FETCH_CHAPTERS": {

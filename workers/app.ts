@@ -5,6 +5,7 @@ import { createDb } from "~/server/db";
 import { handleQueueMessage } from "~/server/queues/handlers";
 import { createEnvelope, queueEventTypes, type QueueMessageEnvelope } from "~/server/queues/messages";
 import { findDueSources } from "~/server/sources/sync";
+import { findDueRepos } from "~/server/sources/repos";
 
 const requestHandler = createRequestHandler(
   () => import("virtual:react-router/server-build"),
@@ -42,6 +43,19 @@ export default {
     for (const source of due) {
       await env.QUEUE_JOBS.send(
         createEnvelope(queueEventTypes.sourceSyncSource, source.id, { sourceId: source.id })
+      );
+    }
+
+    /*
+      书源订阅（清单地址）到期也在这里派发。
+
+      同样只投队列不直接跑：重拉一份清单要抓一个上兆的 JSON 再建几百个源，
+      放在 Cron 里必然撞执行时长上限。
+    */
+    const dueRepos = await findDueRepos(db);
+    for (const repo of dueRepos) {
+      await env.QUEUE_JOBS.send(
+        createEnvelope(queueEventTypes.sourceSyncRepo, repo.id, { repoId: repo.id })
       );
     }
   },

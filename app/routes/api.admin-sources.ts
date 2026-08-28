@@ -26,6 +26,7 @@ import {
 } from "~/server/sources/service";
 import { exportFileName, exportLegadoJson } from "~/server/sources/export";
 import { quickImportAndSubscribe } from "~/server/sources/quick-import";
+import { addRepo, listRepos, removeRepo, setRepoStatus, syncRepo } from "~/server/sources/repos";
 import { batchImportSources } from "~/server/sources/batch-import";
 import { aggregateSearch } from "~/server/sources/search";
 import { bulkUpdateSources, listSourcesFiltered } from "~/server/sources/service";
@@ -68,6 +69,9 @@ export async function loader({ request, context }: Route.LoaderArgs) {
       domains: await listDomains(admin.db),
       restrictionEnabled: await getDomainRestriction(admin.db),
     });
+  }
+  if (path.includes("/repos")) {
+    return Response.json({ repos: await listRepos(admin.db) });
   }
   if (path.includes("/subscriptions")) {
     const sourceId = url.searchParams.get("sourceId") ?? undefined;
@@ -160,6 +164,47 @@ export async function action({ request, context }: Route.ActionArgs) {
         actorId,
       });
       return Response.json(result);
+    }
+
+    /**
+     * 书源订阅（清单地址）的增删改与手动重拉。
+     *
+     * 放在 /batch-import 之前：两者都收清单地址，但批量导入是一次性的，
+     * 订阅会记住地址按间隔重拉。
+     */
+    if (path.includes("/repos")) {
+      const body = (await request.json().catch(() => ({}))) as {
+        repoId?: string;
+        url?: string;
+        name?: string;
+        syncIntervalMinutes?: number;
+        status?: "active" | "paused";
+        op?: "sync";
+      };
+
+      if (request.method === "DELETE") {
+        if (!body.repoId) return Response.json({ error: "repoId required" }, { status: 400 });
+        await removeRepo(admin.db, body.repoId);
+        return Response.json({ ok: true });
+      }
+      if (request.method === "PATCH") {
+        if (!body.repoId) return Response.json({ error: "repoId required" }, { status: 400 });
+        await setRepoStatus(admin.db, body.repoId, body.status ?? "active");
+        return Response.json({ ok: true });
+      }
+      // 立即重拉一个已存在的订阅
+      if (body.op === "sync") {
+        if (!body.repoId) return Response.json({ error: "repoId required" }, { status: 400 });
+        return Response.json({ sync: await syncRepo(admin.db, body.repoId, actorId) });
+      }
+      if (!body.url?.trim()) return Response.json({ error: "订阅地址不能为空" }, { status: 400 });
+      const outcome = await addRepo(admin.db, {
+        url: body.url,
+        name: body.name ?? null,
+        syncIntervalMinutes: body.syncIntervalMinutes ?? null,
+        actorId,
+      });
+      return Response.json({ sync: outcome });
     }
 
     // 从清单地址或粘贴的 JSON 批量导入（书源/订阅源自动判别）
