@@ -10,6 +10,7 @@ import { Input } from "~/components/ui/input";
 import { EmptyState } from "~/components/state/empty-state";
 import { eq, sql } from "drizzle-orm";
 import { encodeSourceRef } from "~/lib/source-ref";
+import { groupKey, preciseRelevance } from "~/lib/book-match";
 import { contentSources } from "drizzle/schema";
 import { cloudflareContext } from "~/server/context";
 import { createDb } from "~/server/db";
@@ -102,8 +103,20 @@ interface BatchResponse {
  * 由用户手动暂停 —— 原先攒到 5 本任意书就停，常常那 5 本都不是想搜的。
  */
 const enoughSourcesForOneBook = 5;
-/** 达到这个相关度才算精准命中，与服务端 preciseRelevance 对齐 */
-const preciseRelevance = 3;
+
+/**
+ * 自动阶段的批次上限。
+ *
+ * 只是防死循环的保险，不是"搜够了"的判据 —— 该由 hasEnough 说停。
+ * 原先是 3，于是 12 个源之后就报「已够用」，而那时往往一本书都没攒到
+ * 5 个精准源：用户要的是搜满 5 个，不是搜三批。每批一次独立 HTTP 请求、
+ * 服务端 maxSourcesPerSearch 封顶 4 个源，批数多不会让单个请求变长，
+ * 不涉及 Error 1102。
+ *
+ * 80 批 × 4 源 = 320 个源，比现有启用源总数还多，实际总是先被
+ * 「源查完了」或「搜够了」终止。
+ */
+const maxAutoBatches = 80;
 
 /**
  * 在线源结果，分批加载。
@@ -111,11 +124,17 @@ const preciseRelevance = 3;
  * 每批只查 8 个源，边查边把结果并进列表。这样单个请求的出站数与
  * CPU 都有界，不会像原先那样一次打 250 个源直接触发 Error 1102。
  */
-/** 合并两批结果：同名同作者的书并到一条，各源作为可选项挂上去 */
+/**
+ * 合并两批结果：同名同作者的书并到一条，各源作为可选项挂上去。
+ *
+ * 键必须用 groupKey（规范化后再拼），与服务端分组时一致。按原始
+ * `书名|作者` 拼会把《剑来》/「剑来」/`剑来 ` 当成不同的书，各源分散在
+ * 好几条里，于是"某一本攒够 5 个源"永远不成立，搜索停不下来。
+ */
 function mergeBooks(prev: SourceBook[], incoming: SourceBook[]): SourceBook[] {
-  const merged = new Map(prev.map((book) => [`${book.title}|${book.author ?? ""}`, book]));
+  const merged = new Map(prev.map((book) => [groupKey(book.title, book.author), book]));
   for (const book of incoming) {
-    const key = `${book.title}|${book.author ?? ""}`;
+    const key = groupKey(book.title, book.author);
     const existing = merged.get(key);
     if (!existing) {
       merged.set(key, { ...book, options: [...book.options] });
@@ -168,11 +187,7 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
   const offsetRef = useRef(0);
   const booksRef = useRef<SourceBook[]>([]);
   const runningRef = useRef(false);
-  /**
-   * 自动阶段最多 3 批；「继续」每次只授权 1 批。这里宁可让用户多点一次，
-   * 也不能把几十个出站请求串成一次长任务 —— 那正是 Error 1102 的来源。
-   */
-  const autoBatchesRef = useRef(3);
+  const autoBatchesRef = useRef(maxAutoBatches);
   const manualBatchesRef = useRef(0);
   const batchCooldownMs = 1_200;
 
@@ -189,7 +204,7 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
     pausedRef.current = false;
     offsetRef.current = 0;
     booksRef.current = [];
-    autoBatchesRef.current = 3;
+    autoBatchesRef.current = maxAutoBatches;
     manualBatchesRef.current = 0;
   }, [query]);
 
@@ -326,7 +341,19 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
         ) : null}
         <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
           {queried}/{sourceCount} 个源 · {okCount} 个有结果 · {books.length} 本
-          {paused ? " · 已暂停" : done ? " · 已查完" : satisfied ? " · 已够用" : ""}
+          {/*
+            「已够用」只在真的攒够时说。satisfied 也包含"手动那一批跑完了"，
+            那种情况下并没有搜够，标成已够用会让用户以为不必再点继续。
+          */}
+          {paused
+            ? " · 已暂停"
+            : done
+              ? " · 已查完"
+              : satisfied
+                ? hasEnough(books)
+                  ? " · 已够用"
+                  : " · 已暂停"
+                : ""}
         </span>
 
         {/*
