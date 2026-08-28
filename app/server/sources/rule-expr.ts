@@ -357,9 +357,26 @@ export function evalRuleNodes(doc: RuleDoc, rule: string): RuleDoc[] {
   const parsed = parseRule(rule);
   for (const branch of parsed.alternatives) {
     const nodes = evalBranchNodes(doc, branch);
-    if (nodes.length > 0) return nodes;
+    if (nodes.length > 0) return expandJsonArrays(nodes);
   }
   return [];
+}
+
+/**
+ * JSONPath 取到数组时展开成逐个元素。
+ *
+ * 列表规则的语义就是「遍历这批条目」，而 Legado 里 `$.data` 与 `$.data[*]`
+ * 是同一个意思 —— 前者靠上下文隐式遍历。我们原先只认显式的 `[*]`，遇到
+ * `$.data` 会把整个数组当成一个节点：目录 570 章只出 1 条，而且那一条的
+ * 字段取值恰好命中数组第一个元素，看不出错在哪。
+ *
+ * 只展开"整条结果就是一个数组"的情况；已经是多个节点时原样返回。
+ */
+function expandJsonArrays(nodes: RuleDoc[]): RuleDoc[] {
+  if (nodes.length !== 1) return nodes;
+  const only = nodes[0]!;
+  if (only.kind !== "json" || !Array.isArray(only.value)) return nodes;
+  return only.value.map((value) => ({ kind: "json" as const, value }));
 }
 
 /** 规则是否可被本引擎理解 */

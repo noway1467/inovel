@@ -1,4 +1,5 @@
 import { UnsupportedRuleError, parseRule, stripListPrefix } from "~/server/sources/rule-expr";
+import { splitUrlAndOptions, templateIsSupported } from "~/server/sources/url-options";
 
 /**
  * 开源阅读（Legado）书源 JSON → 内部规则配置。
@@ -316,6 +317,33 @@ type RuleOutcome =
   | { state: "ok"; rule: string; note?: string }
   | { state: "unusable"; reason: string };
 
+/**
+ * 这条规则是「地址模板」还是「选择器」。
+ *
+ * 地址模板用于目录走 JSON 接口的源：章节地址不是从节点上取 href，而是用条目
+ * 字段拼出来（`@get:{url}p{{$.ordernum}}.html`）。判据是出现 `@get:{` 或
+ * `{{$.` —— 前者读 java.put 存的变量，后者取条目里的字段，选择器语法里都不会有。
+ */
+function isUrlTemplate(raw: string): boolean {
+  return /@get:\{/.test(raw) || /\{\{\s*\$\./.test(raw);
+}
+
+/**
+ * 详情页目录地址：可能是普通选择器，也可能是「地址 + 选项」的请求描述。
+ *
+ * 后者是目录走接口的源（POST + body），此前被当成"需要 JS"丢掉，结果整个源
+ * 退化成从详情页刮最新几章。这里只要表达式全都能求值就留下原文。
+ */
+function resolveTocUrlRule(raw: string | null, warnings: string[]): string | null {
+  if (!raw) return null;
+  const { url } = splitUrlAndOptions(raw);
+  // 带 {{}} 的才需要判；普通选择器照旧走 validate
+  if (!/\{\{/.test(url) && !/@get:\{/.test(url)) return validate(raw, "详情目录地址", warnings);
+  if (templateIsSupported(url)) return raw;
+  warnings.push("详情目录地址需要 JS 求值，已忽略");
+  return null;
+}
+
 /** 解析一条规则，能直接用则用，含 JS 则先试降级 */
 function resolveRule(raw: string | null): RuleOutcome {
   if (!raw) return { state: "absent" };
@@ -386,13 +414,29 @@ export function convertLegadoSource(raw: unknown): ConversionResult {
   if (contentOutcome.note) warnings.push(`正文：${contentOutcome.note}`);
 
   /**
+   * chapterUrl 有两种形态，要分开判：
+   *
+   *  1. 选择器 —— `a@href`，从目录节点上取属性（绝大多数源）
+   *  2. 地址模板 —— `@get:{url}p{{$.ordernum}}.html`，用条目字段拼出地址
+   *
+   * 第二种在「目录走 JSON 接口」的源里很常见（爱下电子书8 就是），按选择器
+   * 去解会拒掉或解成碎片，于是整组降级、只能从详情页刮到最新几章。
+   */
+  const tocUrlIsTemplate = rawTocUrl ? isUrlTemplate(rawTocUrl) : false;
+  const tocUrlOutcome: RuleOutcome = tocUrlIsTemplate
+    ? templateIsSupported(rawTocUrl!)
+      ? { state: "ok", rule: rawTocUrl! }
+      : { state: "unusable", reason: "章节地址模板里有无法求值的表达式" }
+    : resolveRule(rawTocUrl);
+
+  /**
    * 目录三件套要么整组可用，要么整组放弃转探测 —— 不能只留一半：
    * 有 chapterList 没 chapterUrl 的话，取出来的章节没有可访问地址。
    */
   const tocOutcomes = {
     tocList: resolveRule(rawTocList),
     tocName: resolveRule(rawTocName),
-    tocUrl: resolveRule(rawTocUrl),
+    tocUrl: tocUrlOutcome,
   } as const;
   const tocLabels = { tocList: "目录列表", tocName: "章节名", tocUrl: "章节地址" } as const;
 
@@ -436,7 +480,14 @@ export function convertLegadoSource(raw: unknown): ConversionResult {
     infoAuthor: validate(clean(source.ruleBookInfo?.author), "详情作者", warnings),
     infoIntro: validate(clean(source.ruleBookInfo?.intro), "详情简介", warnings),
     infoCover: validate(clean(source.ruleBookInfo?.coverUrl), "详情封面", warnings),
-    infoTocUrl: validate(clean(source.ruleBookInfo?.tocUrl), "详情目录地址", warnings),
+    /**
+     * 详情页里的目录地址。
+     *
+     * 不走 validate：这一项常是「地址 + 选项」形态（POST 取 JSON 目录，
+     * 即源站那个「完整目录」按钮），validate 按选择器判会当成"需要 JS"丢掉。
+     * 能不能用由 url-options.ts 逐个表达式判，存原文、取目录时才求值。
+     */
+    infoTocUrl: resolveTocUrlRule(clean(source.ruleBookInfo?.tocUrl), warnings),
     tocMode,
     tocList: tocMode === "rules" ? (tocOutcomes.tocList as { rule: string }).rule : null,
     tocName: tocMode === "rules" ? (tocOutcomes.tocName as { rule: string }).rule : null,

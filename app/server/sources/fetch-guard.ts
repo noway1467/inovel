@@ -135,6 +135,19 @@ export async function checkSourceUrl(db: AppDb, raw: string): Promise<UrlCheck> 
   return parsed;
 }
 
+/**
+ * 抓取参数。
+ *
+ * POST 是为了取「完整目录」那类接口：不少书源的目录不是页面而是一次 POST
+ * 拿回的 JSON（见 url-options.ts）。此前只支持 GET，这类源只能从详情页
+ * 刮到最新几章。
+ */
+export interface GuardedFetchInit {
+  headers?: Record<string, string>;
+  method?: "GET" | "POST";
+  body?: string;
+}
+
 export interface GuardedFetchResult {
   status: number;
   body: string;
@@ -204,7 +217,7 @@ function extractChallengeToken(result: GuardedFetchResult): string | null {
 export async function guardedFetch(
   db: AppDb,
   raw: string,
-  init?: { headers?: Record<string, string> }
+  init?: GuardedFetchInit
 ): Promise<{ ok: true; result: GuardedFetchResult } | FetchRejection | { ok: false; code: "FETCH_FAILED"; message: string }> {
   let last = await guardedFetchOnce(db, raw, init);
   for (let attempt = 0; attempt < maxRetries; attempt++) {
@@ -248,7 +261,7 @@ export async function guardedFetch(
 async function guardedFetchOnce(
   db: AppDb,
   raw: string,
-  init?: { headers?: Record<string, string> }
+  init?: GuardedFetchInit
 ): Promise<{ ok: true; result: GuardedFetchResult } | FetchRejection | { ok: false; code: "FETCH_FAILED"; message: string }> {
   const check = await checkSourceUrl(db, raw);
   if (!check.ok) return check;
@@ -256,14 +269,24 @@ async function guardedFetchOnce(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), fetchTimeoutMs);
   try {
+    const method = init?.method ?? "GET";
     const response = await fetch(check.url.toString(), {
+      method,
       redirect: "follow",
       signal: controller.signal,
       headers: {
         "User-Agent": userAgent,
         Accept: "*/*",
+        /**
+         * POST 默认按表单编码：书源里的 body 绝大多数是 `bid=65688` 这种
+         * 表单串。写成 JSON 的源会自己在 headers 里覆盖 Content-Type。
+         */
+        ...(method === "POST" && init?.body
+          ? { "Content-Type": "application/x-www-form-urlencoded" }
+          : {}),
         ...init?.headers,
       },
+      ...(method === "POST" && init?.body !== undefined ? { body: init.body } : {}),
     });
 
     // 跟随重定向后的落点也必须在白名单内，否则等于绕过授权

@@ -7,6 +7,7 @@ import {
   parseLegadoJson,
 } from "~/server/sources/legado";
 import { canParseRule } from "~/server/sources/rule-expr";
+import { templateIsSupported } from "~/server/sources/url-options";
 
 interface RawSource {
   bookSourceName?: string;
@@ -80,7 +81,16 @@ describe.skipIf(!hasFixture)("真实书源合集转换率", () => {
       }
       expect(canParseRule(item.config.tocList!)).toBe(true);
       expect(canParseRule(item.config.tocName!)).toBe(true);
-      expect(canParseRule(item.config.tocUrl!)).toBe(true);
+      /**
+       * 章节地址有两种合法形态：选择器（`a@href`，从节点取属性）和地址模板
+       * （`@get:{url}p{{$.ordernum}}.html`，用条目字段拼）。后者用于目录走
+       * JSON 接口的源 —— 那种目录里根本没有 href，地址是算出来的，
+       * 拿去 canParseRule 判必然不通过。
+       */
+      const tocUrl = item.config.tocUrl!;
+      const isTemplate = /@get:\{/.test(tocUrl) || /\{\{\s*\$\./.test(tocUrl);
+      expect(isTemplate || canParseRule(tocUrl)).toBe(true);
+      if (isTemplate) expect(templateIsSupported(tocUrl)).toBe(true);
     }
   });
 

@@ -3,7 +3,14 @@ import {
   guardedFetch,
   paginationDelayMs,
   politeDelayMs,
+  type GuardedFetchInit,
 } from "~/server/sources/fetch-guard";
+import {
+  applyTemplate,
+  parseRequestOptions,
+  splitUrlAndOptions,
+  type VarStore,
+} from "~/server/sources/url-options";
 import { parseHtml } from "~/server/sources/html";
 import { buildSearchUrl, degradeJsRule, type RulesConfig } from "~/server/sources/legado";
 import {
@@ -195,11 +202,15 @@ function readConfig(config: Record<string, unknown>): RulesConfig {
  */
 async function loadDoc(
   ctx: Parameters<SourceAdapter["listBooks"]>[0],
-  url: string
+  url: string,
+  /** 目录接口那类需要 POST + body 的请求，见 resolveTocUrl */
+  init?: GuardedFetchInit
 ): Promise<RuleDoc> {
   ctx.countRequest();
   const response = await guardedFetch(ctx.db, url, {
-    headers: { Accept: "text/html,application/json;q=0.9,*/*;q=0.8" },
+    headers: { Accept: "text/html,application/json;q=0.9,*/*;q=0.8", ...init?.headers },
+    ...(init?.method ? { method: init.method } : {}),
+    ...(init?.body !== undefined ? { body: init.body } : {}),
   });
   if (!response.ok) throw new Error(response.message);
   if (response.result.status >= 400) throw new Error(`源返回 HTTP ${response.result.status}`);
@@ -219,15 +230,79 @@ async function loadDoc(
 }
 
 /** 目录页可能与详情页不同，按 infoTocUrl 规则跳转一次 */
+/**
+ * 目录请求：地址 + 请求方式。
+ *
+ * 目录不一定是个页面 —— 相当一批源的完整目录是一次 POST 拿回的 JSON
+ * （源站上那个「完整目录」按钮）。vars 带着 java.put 存下的变量，
+ * 后面拼章节地址要用。
+ */
+interface TocRequest {
+  url: string;
+  init?: GuardedFetchInit;
+  vars: VarStore;
+}
+
+/**
+ * 用条目字段拼章节地址。
+ *
+ * 模板里的 `{{$.ordernum}}` 是对当前条目求 JSONPath，`@get:{url}` 读的是
+ * java.put 存下的书籍地址。目录走 JSON 接口的源靠这个拿到章节地址 ——
+ * 那种目录里根本没有 href，地址是算出来的。
+ */
+function buildChapterUrlFromTemplate(
+  template: string,
+  item: RuleDoc,
+  vars: VarStore
+): string | null {
+  const extra: Record<string, string> = {};
+  // 取出模板里所有 {{$.xxx}}，逐个对当前条目求值
+  for (const raw of template.match(/\{\{\s*\$\.[^}]*\}\}/g) ?? []) {
+    const expr = raw.slice(2, -2).trim();
+    const value = evalRuleOne(item, expr);
+    if (!value) return null;
+    extra[expr] = value;
+  }
+  return applyTemplate(template, { baseUrl: "", vars, extra });
+}
+
 async function resolveTocUrl(
   ctx: Parameters<SourceAdapter["listBooks"]>[0],
   config: RulesConfig,
   bookUrl: string
-): Promise<string> {
-  if (!config.infoTocUrl) return bookUrl;
+): Promise<TocRequest> {
+  const vars: VarStore = new Map();
+  if (!config.infoTocUrl) return { url: bookUrl, vars };
+
+  /**
+   * 「地址 + 选项」形态优先：这类规则不是选择器，不能拿去 evalRuleOne
+   * （那会当成选择器在页面里找，必然落空然后退回书籍地址 ——
+   * 表现就是只能刮到详情页上那几条最新章节）。
+   */
+  const { url: urlTemplate, optionsText } = splitUrlAndOptions(config.infoTocUrl);
+  if (/\{\{/.test(urlTemplate) || /@get:\{/.test(urlTemplate)) {
+    const resolved = applyTemplate(urlTemplate, { baseUrl: bookUrl, vars });
+    if (resolved) {
+      const options = parseRequestOptions(optionsText);
+      const body = options.body
+        ? applyTemplate(options.body, { baseUrl: bookUrl, vars })
+        : undefined;
+      return {
+        url: resolveUrl(bookUrl, resolved),
+        init: {
+          method: options.method,
+          ...(body !== null && body !== undefined ? { body } : {}),
+          ...(options.headers ? { headers: options.headers } : {}),
+        },
+        vars,
+      };
+    }
+  }
+
+  // 普通形态：从详情页上用选择器取目录地址
   const doc = await loadDoc(ctx, bookUrl);
   const raw = evalRuleOne(doc, config.infoTocUrl);
-  return raw ? resolveUrl(bookUrl, raw) : bookUrl;
+  return { url: raw ? resolveUrl(bookUrl, raw) : bookUrl, vars };
 }
 
 export const rulesAdapter: SourceAdapter = {
@@ -289,7 +364,8 @@ export const rulesAdapter: SourceAdapter = {
    */
   async listChapters(ctx, book): Promise<SourceChapter[]> {
     const config = readConfig(ctx.config);
-    const firstUrl = await resolveTocUrl(ctx, config, book.externalId);
+    const tocRequest = await resolveTocUrl(ctx, config, book.externalId);
+    const firstUrl = tocRequest.url;
 
     /**
      * 目录规则不可翻译的源（整段 JS）直接走探测，不必先跑一遍必定
@@ -320,10 +396,22 @@ export const rulesAdapter: SourceAdapter = {
       visited.add(pageUrl);
       pages += 1;
 
-      const doc = await loadDoc(ctx, pageUrl);
+      // 第一页可能是 POST（目录接口）；后续分页一律 GET
+      const doc = await loadDoc(ctx, pageUrl, pages === 1 ? tocRequest.init : undefined);
+
+      /**
+       * 章节地址两种取法：
+       *  - 选择器（`a@href`）：从条目节点上取属性，绝大多数源
+       *  - 地址模板（`@get:{url}p{{$.ordernum}}.html`）：用条目字段拼，
+       *    目录走 JSON 接口的源常用
+       */
+      const urlIsTemplate = /@get:\{/.test(tocUrlRule) || /\{\{\s*\$\./.test(tocUrlRule);
+
       for (const item of evalRuleNodes(doc, tocListRule)) {
         const title = evalRuleOne(item, tocNameRule);
-        const href = evalRuleOne(item, tocUrlRule);
+        const href = urlIsTemplate
+          ? buildChapterUrlFromTemplate(tocUrlRule, item, tocRequest.vars)
+          : evalRuleOne(item, tocUrlRule);
         if (!title || !href) continue;
         const externalKey = resolveUrl(pageUrl, href);
         // 目录页常有"最新章节"重复块，按地址去重

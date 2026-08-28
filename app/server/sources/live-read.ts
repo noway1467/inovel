@@ -34,8 +34,10 @@ const contentCacheTtlMs = 7 * 24 * 60 * 60 * 1000;
  * v4: 套用书源自带的净化规则（replaceRegex），旧缓存里是没净化的正文
  * v5: 过浏览器验证挑战 + 目录探测按地址形状剔除杂链，旧缓存里存的是验证页
  *     文字与一堆假章节
+ * v6: 支持 POST 目录接口（源站「完整目录」按钮），旧缓存里只有详情页刮到的
+ *     最新几章
  */
-const pipelineVersion = "v5";
+const pipelineVersion = "v6";
 
 /** 源地址不能直接当 R2 键（含协议与斜杠），用摘要 */
 async function keyHash(value: string): Promise<string> {
