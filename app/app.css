@@ -2,25 +2,32 @@
 
 @custom-variant dark (&:where(.dark, .dark *));
 
+/*
+  平台配色。
+
+  颜色全部走 CSS 变量，@theme 里只声明"有哪些颜色"，具体色值由
+  下面的 [data-theme] 块给。这样换主题只是换 html 上的一个属性，
+  不必让组件知道当前是哪套 —— 组件一律写 bg-surface / text-primary。
+*/
 @theme {
-  --color-brand: #2f6f52;
-  --color-accent: #a36532;
-  --color-success: #2f6f52;
-  --color-warning: #9a641f;
-  --color-danger: #b54036;
+  --color-brand: var(--c-primary);
+  --color-accent: var(--c-accent);
+  --color-success: #2f7d54;
+  --color-warning: #b0700f;
+  --color-danger: #c0392b;
 
-  --color-background: #f3f2ed;
-  --color-foreground: #252924;
-  --color-surface: #fbfaf7;
-  --color-muted: #ebeae4;
-  --color-muted-foreground: #6c7069;
-  --color-border: #d8d8cf;
-  --color-ring: #2f6f52;
+  --color-background: var(--c-background);
+  --color-foreground: var(--c-foreground);
+  --color-surface: var(--c-surface);
+  --color-muted: var(--c-muted);
+  --color-muted-foreground: var(--c-muted-foreground);
+  --color-border: var(--c-border);
+  --color-ring: var(--c-primary);
 
-  --color-primary: #2f6f52;
-  --color-primary-foreground: #ffffff;
-  --color-secondary: #e1ebe4;
-  --color-secondary-foreground: #24553f;
+  --color-primary: var(--c-primary);
+  --color-primary-foreground: var(--c-primary-foreground);
+  --color-secondary: var(--c-secondary);
+  --color-secondary-foreground: var(--c-secondary-foreground);
 
   --radius-sm: 6px;
   --radius-md: 10px;
@@ -31,18 +38,132 @@
   --font-hei: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
 }
 
-.dark {
-  --color-background: #151916;
-  --color-foreground: #e4e8e3;
-  --color-surface: #1d221e;
-  --color-muted: #272c28;
-  --color-muted-foreground: #a2aaa3;
-  --color-border: #343b35;
-  --color-ring: #75b08d;
-  --color-primary: #75b08d;
-  --color-primary-foreground: #112119;
-  --color-secondary: #26382d;
-  --color-secondary-foreground: #b8d9c5;
+/*
+  ── 主题定义 ──────────────────────────────────────────────
+
+  每套主题两块：浅色写在 [data-theme="x"]，深色写在 .dark[data-theme="x"]。
+  html 上没有 data-theme 时按暖橘走（见下面的兜底选择器），这样
+  首屏脚本还没跑、或 localStorage 读不到时页面也不会没颜色。
+
+  --c-* 是私有层，只给上面的 @theme 消费；组件不要直接用。
+*/
+
+/* 暖橘 · 奶油纸 —— 默认 */
+[data-theme="amber"],
+html:not([data-theme]) {
+  --c-primary: #ea7a33;
+  --c-primary-foreground: #ffffff;
+  --c-accent: #c2410c;
+  --c-background: #fdf8f3;
+  --c-foreground: #2b2320;
+  --c-surface: #ffffff;
+  --c-muted: #f7ede3;
+  --c-muted-foreground: #7a6a5f;
+  --c-border: #f0e2d4;
+  --c-secondary: #fdeddd;
+  --c-secondary-foreground: #9a4b16;
+}
+
+.dark[data-theme="amber"],
+html.dark:not([data-theme]) {
+  --c-primary: #f59e5f;
+  --c-primary-foreground: #2a1708;
+  --c-accent: #fb923c;
+  --c-background: #1a1512;
+  --c-foreground: #ede4dc;
+  --c-surface: #231c18;
+  --c-muted: #2e2521;
+  --c-muted-foreground: #a89a8f;
+  --c-border: #382c25;
+  --c-secondary: #3a2a1c;
+  --c-secondary-foreground: #f7c99b;
+}
+
+/* 墨蓝 · 宣纸 */
+[data-theme="ink"] {
+  --c-primary: #2f5d8a;
+  --c-primary-foreground: #ffffff;
+  --c-accent: #1d4ed8;
+  --c-background: #f5f6f8;
+  --c-foreground: #1f2530;
+  --c-surface: #ffffff;
+  --c-muted: #eaeef3;
+  --c-muted-foreground: #647080;
+  --c-border: #dfe5ec;
+  --c-secondary: #e4ecf6;
+  --c-secondary-foreground: #24486d;
+}
+
+.dark[data-theme="ink"] {
+  --c-primary: #7aa8d8;
+  --c-primary-foreground: #0e1a26;
+  --c-accent: #93b8e3;
+  --c-background: #12161c;
+  --c-foreground: #dfe5ec;
+  --c-surface: #1a1f27;
+  --c-muted: #232a34;
+  --c-muted-foreground: #94a1b2;
+  --c-border: #2c343f;
+  --c-secondary: #1f2d3d;
+  --c-secondary-foreground: #a9c8e6;
+}
+
+/* 青苔 —— 原来的绿，留给习惯它的人 */
+[data-theme="moss"] {
+  --c-primary: #2f6f52;
+  --c-primary-foreground: #ffffff;
+  --c-accent: #a36532;
+  --c-background: #f3f2ed;
+  --c-foreground: #252924;
+  --c-surface: #fbfaf7;
+  --c-muted: #ebeae4;
+  --c-muted-foreground: #6c7069;
+  --c-border: #d8d8cf;
+  --c-secondary: #e1ebe4;
+  --c-secondary-foreground: #24553f;
+}
+
+.dark[data-theme="moss"] {
+  --c-primary: #75b08d;
+  --c-primary-foreground: #112119;
+  --c-accent: #c08b5a;
+  --c-background: #151916;
+  --c-foreground: #e4e8e3;
+  --c-surface: #1d221e;
+  --c-muted: #272c28;
+  --c-muted-foreground: #a2aaa3;
+  --c-border: #343b35;
+  --c-secondary: #26382d;
+  --c-secondary-foreground: #b8d9c5;
+}
+
+/* 绛紫 */
+[data-theme="plum"] {
+  --c-primary: #8b4a72;
+  --c-primary-foreground: #ffffff;
+  --c-accent: #a13d6a;
+  --c-background: #faf6f8;
+  --c-foreground: #2a222a;
+  --c-surface: #ffffff;
+  --c-muted: #f2eaf0;
+  --c-muted-foreground: #756a72;
+  --c-border: #e9dce6;
+  --c-secondary: #f6e8f1;
+  --c-secondary-foreground: #6f3357;
+}
+
+.dark[data-theme="plum"] {
+  --c-primary: #c68aae;
+  --c-primary-foreground: #23131c;
+  --c-accent: #d69cbd;
+  --c-background: #171317;
+  --c-foreground: #eae0e7;
+  --c-surface: #1f1a1f;
+  --c-muted: #2a232a;
+  --c-muted-foreground: #a89ba4;
+  --c-border: #342b33;
+  --c-secondary: #33222d;
+  --c-secondary-foreground: #e0b5cf;
 }
 
 @layer base {
@@ -84,18 +205,91 @@
   }
 }
 
+/*
+  底纹。
+
+  原来是 28px 的网格线，满屏细线在深色下尤其像没做完的稿子。
+  换成两团极淡的主色光晕 + 一层噪点：不抢内容，但把纯色背景那种
+  "塑料感"压掉。noise 用 SVG feTurbulence 内联，不额外发请求。
+*/
 .app-shell {
   background-color: var(--color-background);
   background-image:
-    linear-gradient(color-mix(in srgb, var(--color-foreground) 2.5%, transparent) 1px, transparent 1px),
-    linear-gradient(90deg, color-mix(in srgb, var(--color-foreground) 2.5%, transparent) 1px, transparent 1px);
-  background-size: 28px 28px;
+    radial-gradient(
+      68rem 40rem at 12% -8%,
+      color-mix(in srgb, var(--color-primary) 9%, transparent),
+      transparent 62%
+    ),
+    radial-gradient(
+      52rem 34rem at 92% 4%,
+      color-mix(in srgb, var(--color-accent) 7%, transparent),
+      transparent 58%
+    );
+  background-repeat: no-repeat;
+  background-attachment: fixed;
 }
 
+/*
+  isolation 是必需的：噪点层要 z-index: -1 才不会盖住正文，
+  但负层级会一路穿到 body 背景之下而看不见。给 .app-shell 建一个
+  独立层叠上下文，-1 的下界就被限制在它自己身上。
+*/
+.app-shell {
+  isolation: isolate;
+}
+
+.app-shell::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  opacity: 0.035;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+.dark .app-shell::before {
+  opacity: 0.055;
+}
+
+/*
+  卡片。
+
+  质感靠三层叠出来：顶边一道内高光（纸的厚度）、一道贴身的窄阴影
+  （压住边界）、一道大范围的软阴影（离开背景）。只用 box-shadow，
+  不加伪元素，随便套在哪个容器上都不会打乱布局。
+*/
 .paper-panel {
   border: 1px solid var(--color-border);
   background: var(--color-surface);
-  box-shadow: 0 10px 30px color-mix(in srgb, var(--color-foreground) 6%, transparent);
+  box-shadow:
+    0 1px 0 color-mix(in srgb, white 60%, transparent) inset,
+    0 1px 2px color-mix(in srgb, var(--color-foreground) 5%, transparent),
+    0 12px 28px -12px color-mix(in srgb, var(--color-foreground) 14%, transparent);
+}
+
+.dark .paper-panel {
+  box-shadow:
+    0 1px 0 color-mix(in srgb, white 6%, transparent) inset,
+    0 1px 2px color-mix(in srgb, black 30%, transparent),
+    0 12px 28px -12px color-mix(in srgb, black 45%, transparent);
+}
+
+/* 卡片列表项：比 paper-panel 轻一档，避免一屏几十个阴影糊成一片 */
+.paper-row {
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--color-foreground) 4%, transparent);
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.paper-row:hover {
+  border-color: color-mix(in srgb, var(--color-primary) 38%, var(--color-border));
+  box-shadow:
+    0 1px 2px color-mix(in srgb, var(--color-foreground) 5%, transparent),
+    0 6px 16px -8px color-mix(in srgb, var(--color-primary) 26%, transparent);
 }
 
 .book-cover-shell {

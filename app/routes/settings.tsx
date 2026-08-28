@@ -6,6 +6,7 @@ import { Button } from "~/components/ui/button";
 import { ProfileForm } from "~/components/settings/profile-form";
 import { PasswordForm } from "~/components/settings/password-form";
 import { SignOutButton } from "~/components/settings/sign-out-button";
+import { SkinPicker } from "~/components/skin-picker";
 import { cloudflareContext } from "~/server/context";
 import { createDb } from "~/server/db";
 import { createAuth } from "~/server/auth";
@@ -93,6 +94,8 @@ export default function SettingsPage({ loaderData }: Route.ComponentProps) {
           </Link>
         ))}
       </nav>
+
+      <SkinPicker />
 
       <ProfileForm initialName={user.name} initialImage={user.image} />
 

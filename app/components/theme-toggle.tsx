@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Moon, Sun } from "lucide-react";
 import { Button } from "~/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "~/components/ui/tooltip";
+import { modeStorageKey } from "~/lib/skins";
 
 export function ThemeToggle() {
   const [dark, setDark] = useState(false);
@@ -15,7 +16,7 @@ export function ThemeToggle() {
     setDark(next);
     document.documentElement.classList.toggle("dark", next);
     try {
-      localStorage.setItem("yuedu-theme", next ? "dark" : "light");
+      localStorage.setItem(modeStorageKey, next ? "dark" : "light");
     } catch {
       // 隐私模式等场景下忽略本地存储失败
     }

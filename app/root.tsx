@@ -3,13 +3,27 @@ import { TooltipProvider } from "~/components/ui/tooltip";
 import type { Route } from "./+types/root";
 import "./app.css";
 
+/*
+  首屏之前定好配色，避免闪一下白再变深色。
+
+  两个维度各自独立存：
+   - yuedu-theme  明暗（light / dark），没存就跟系统
+   - yuedu-skin   哪套配色（amber / ink / moss / plum），没存就 amber
+
+  取值都做了白名单校验 —— localStorage 是用户可改的，脏值直接落到
+  data-theme 上会得到一个没有任何颜色变量的页面。
+*/
 const themeInitScript = `
 try {
-  const stored = localStorage.getItem("yuedu-theme");
-  const theme = stored === "dark" || stored === "light"
-    ? stored
-    : (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
-  document.documentElement.classList.toggle("dark", theme === "dark");
+  var skins = ["amber", "ink", "moss", "plum"];
+  var skin = localStorage.getItem("yuedu-skin");
+  document.documentElement.dataset.theme = skins.indexOf(skin) >= 0 ? skin : "amber";
+
+  var stored = localStorage.getItem("yuedu-theme");
+  var dark = stored === "dark" || stored === "light"
+    ? stored === "dark"
+    : window.matchMedia("(prefers-color-scheme: dark)").matches;
+  document.documentElement.classList.toggle("dark", dark);
 } catch (_) {}
 `;
 
@@ -19,7 +33,9 @@ export function Layout({ children }: { children: React.ReactNode }) {
       <head>
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-        <meta name="theme-color" content="#2563eb" />
+        {/* 移动端地址栏配色，跟默认主题的底色一致 */}
+        <meta name="theme-color" content="#fdf8f3" media="(prefers-color-scheme: light)" />
+        <meta name="theme-color" content="#1a1512" media="(prefers-color-scheme: dark)" />
         <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
         <Meta />
         <Links />
