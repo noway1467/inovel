@@ -8,6 +8,7 @@ import { cn } from "~/lib/utils";
 import {
   defaultReaderSettings,
   readerThemes,
+  sideMarginRange,
   type PaginationMode,
   type ReaderSettings,
 } from "~/components/reader/reader-settings";
@@ -115,6 +116,27 @@ export function ReaderSettingsPanel({
             />
           </section>
 
+          {/*
+            左右留白。手机与窄窗口上「正文宽度」那档行长上限压不到，
+            行会一直顶到屏幕两边；这个滑块按比例收边距，两种屏宽都生效。
+          */}
+          <section className="space-y-2">
+            <div className="flex items-center justify-between">
+              <Label>左右留白</Label>
+              <span className="text-xs tabular-nums text-muted-foreground">
+                每侧 {settings.sideMargin}%
+              </span>
+            </div>
+            <Slider
+              value={[settings.sideMargin]}
+              min={sideMarginRange.min}
+              max={sideMarginRange.max}
+              step={sideMarginRange.step}
+              onValueChange={([value]) => update({ sideMargin: value ?? settings.sideMargin })}
+              aria-label="左右留白"
+            />
+          </section>
+
           <section className="grid grid-cols-2 gap-3">
             <div className="space-y-2">
               <Label>字体</Label>
@@ -130,6 +152,7 @@ export function ReaderSettingsPanel({
               </Select>
             </div>
             <div className="space-y-2">
+              {/* 只在宽屏上起作用：把行长压到上限，窄屏由上面的左右留白负责 */}
               <Label>正文宽度</Label>
               <Select value={settings.margin} onValueChange={(value) => update({ margin: value as ReaderSettings["margin"] })}>
                 <SelectTrigger aria-label="正文宽度">

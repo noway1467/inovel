@@ -1,9 +1,20 @@
+import { useState } from "react";
 import { Link } from "react-router";
-import { Clock3, Compass, Library } from "lucide-react";
+import { Clock3, Compass } from "lucide-react";
 import type { Route } from "./+types/library";
 import { BookCard, type BookSummary } from "~/components/book/book-card";
+import {
+  ShelfBookRow,
+  ShelfViewToggle,
+  SourceBookCard,
+  SourceBookRow,
+  shelfGridClass,
+  useShelfView,
+  type SourceShelfEntry,
+} from "~/components/book/shelf-view";
 import { EmptyState } from "~/components/state/empty-state";
 import { Button } from "~/components/ui/button";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "~/components/ui/tabs";
 import { cloudflareContext } from "~/server/context";
 import { createDb } from "~/server/db";
 import { createAuth } from "~/server/auth";
@@ -58,8 +69,56 @@ export async function loader({ request, context }: Route.LoaderArgs) {
   };
 }
 
+/**
+ * loader 里那份在线源书籍的形状。
+ *
+ * 不从 loader 返回类型里取：未登录分支返回的对象没有 sourceItems 这个键，
+ * 联合类型上索引它会直接报错。
+ */
+interface SourceItem {
+  sourceId: string;
+  bookUrl: string;
+  bookTitle: string;
+  sourceName: string | null;
+  lastChapterTitle: string | null;
+  lastChapterKey: string | null;
+  lastChapterIndex: number | null;
+  chapterCount: number | null;
+}
+
+/** 在线源书籍 → 统一的书架条目：有读过的章节就直接续读，否则回书籍页 */
+function toSourceEntry(item: SourceItem): SourceShelfEntry {
+  const href = item.lastChapterKey
+    ? `/source/${item.sourceId}/chapter?key=${encodeSourceRef(
+        item.lastChapterKey
+      )}&title=${encodeURIComponent(item.bookTitle)}&book=${encodeSourceRef(item.bookUrl)}&i=${
+        item.lastChapterIndex ?? 0
+      }`
+    : `/source/${item.sourceId}/book?url=${encodeSourceRef(
+        item.bookUrl
+      )}&title=${encodeURIComponent(item.bookTitle)}`;
+  return {
+    key: `${item.sourceId}-${item.bookUrl}`,
+    href,
+    title: item.bookTitle,
+    sourceName: item.sourceName,
+    meta: item.lastChapterTitle
+      ? `读到 ${item.lastChapterTitle}`
+      : `共 ${item.chapterCount ?? "?"} 章`,
+  };
+}
+
 export default function LibraryPage({ loaderData }: Route.ComponentProps) {
   const sourceItems = loaderData.sourceItems ?? [];
+  const [view, setView] = useShelfView();
+  /**
+   * 默认停在有书的那一栏。
+   *
+   * 只用在线源的用户打开书架不该看到一个空的「站内」栏 —— 那看着像书丢了。
+   */
+  const [tab, setTab] = useState(
+    loaderData.items.length === 0 && sourceItems.length > 0 ? "source" : "local"
+  );
 
   if (!loaderData.user) {
     return (
@@ -93,29 +152,69 @@ export default function LibraryPage({ loaderData }: Route.ComponentProps) {
     );
   }
 
-  return (
-    <div className="space-y-5">
-      <header className="paper-panel flex flex-col justify-between gap-4 rounded-2xl p-5 sm:flex-row sm:items-end">
-        <div>
-          <p className="flex items-center gap-2 text-xs font-semibold tracking-[0.2em] text-primary"><Library className="size-4" /> 我的书架</p>
-          <h1 className="mt-2 font-serif text-2xl font-semibold">随手翻开，接着上次读</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            共 {loaderData.items.length + sourceItems.length} 本，阅读进度已同步。
-          </p>
-        </div>
-        <div className="flex gap-2">
-          <Link to="/history" className="inline-flex h-9 items-center gap-2 rounded-lg border border-border bg-background px-3 text-sm hover:bg-muted">
-            <Clock3 className="size-4" /> 最近阅读
-          </Link>
-          <Link to="/" className="inline-flex h-9 items-center gap-2 rounded-lg bg-primary px-3 text-sm font-semibold text-primary-foreground">
-            <Compass className="size-4" /> 发现新书
-          </Link>
-        </div>
-      </header>
+  const sourceEntries = sourceItems.map(toSourceEntry);
 
-      {loaderData.items.length > 0 && (
-        <section className="paper-panel rounded-2xl p-4 sm:p-5" aria-label="书架图书">
-          <div className="grid grid-cols-3 gap-x-3 gap-y-6 sm:grid-cols-4 sm:gap-x-5 md:grid-cols-5 lg:grid-cols-6">
+  return (
+    <Tabs value={tab} onValueChange={setTab}>
+      {/*
+        原来这里是一整块 paper-panel 标题头（大标题 + 副文案 + 两个入口），
+        竖着吃掉近 140px 却不带信息。现在压成一行：左边分栏切换，
+        右边排布切换与两个入口，书直接从第一屏开始。
+      */}
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <TabsList className="h-9">
+          <TabsTrigger value="local" className="min-h-8 px-3">
+            站内书
+            <span className="ml-1.5 text-xs opacity-60">{loaderData.items.length}</span>
+          </TabsTrigger>
+          <TabsTrigger value="source" className="min-h-8 px-3">
+            在线书
+            <span className="ml-1.5 text-xs opacity-60">{sourceEntries.length}</span>
+          </TabsTrigger>
+        </TabsList>
+
+        <div className="ml-auto flex items-center gap-2">
+          <ShelfViewToggle value={view} onChange={setView} />
+          <Button variant="outline" size="icon-sm" aria-label="最近阅读" title="最近阅读" asChild>
+            <Link to="/history">
+              <Clock3 className="size-4" />
+            </Link>
+          </Button>
+          <Button variant="outline" size="icon-sm" aria-label="发现新书" title="发现新书" asChild>
+            <Link to="/">
+              <Compass className="size-4" />
+            </Link>
+          </Button>
+        </div>
+      </div>
+
+      <TabsContent value="local" className="mt-0">
+        {loaderData.items.length === 0 ? (
+          <p className="rounded-lg border border-border bg-surface px-3 py-6 text-center text-sm text-muted-foreground">
+            站内书架还是空的，去
+            <Link to="/" className="mx-1 text-primary hover:underline">
+              发现页
+            </Link>
+            挑一本。
+          </p>
+        ) : view === "list" ? (
+          // 列表两列：宽屏上单列会剩一大片空白，两列正好用满 1180px 的内容宽
+          <div className="paper-panel grid gap-0.5 rounded-xl p-2 md:grid-cols-2">
+            {loaderData.items.map(({ book, progress }, i) => (
+              <ShelfBookRow
+                key={book.id}
+                to={`/books/${book.id}`}
+                title={book.title}
+                authorName={book.authorName}
+                coverKey={book.coverKey}
+                seed={i}
+                progress={progress?.bookProgress ?? 0}
+                meta={book.latestChapterTitle ? `更新至 ${book.latestChapterTitle}` : null}
+              />
+            ))}
+          </div>
+        ) : (
+          <div className={`paper-panel rounded-xl p-3 sm:p-4 ${shelfGridClass[view]}`}>
             {loaderData.items.map(({ book, progress }, i) => {
               const summary: BookSummary = {
                 id: book.id,
@@ -130,51 +229,38 @@ export default function LibraryPage({ loaderData }: Route.ComponentProps) {
                 coverKey: book.coverKey,
                 progress: progress?.bookProgress ?? 0,
               };
-              return <BookCard key={book.id} book={summary} seed={i} />;
-            })}
-          </div>
-        </section>
-      )}
-
-      {/*
-        在线源的书没有封面与元数据（不入 books 表），用列表呈现更实在；
-        点进去直接续读上次那一章，与本地书的书架行为一致。
-      */}
-      {sourceItems.length > 0 && (
-        <section className="paper-panel rounded-2xl p-4 sm:p-5" aria-label="在线源图书">
-          <h2 className="mb-2 text-sm font-semibold">在线源（{sourceItems.length}）</h2>
-          <ul className="divide-y divide-border/60">
-            {sourceItems.map((item) => {
-              const href = item.lastChapterKey
-                ? `/source/${item.sourceId}/chapter?key=${encodeSourceRef(
-                    item.lastChapterKey
-                  )}&title=${encodeURIComponent(item.bookTitle)}&book=${encodeSourceRef(
-                    item.bookUrl
-                  )}&i=${item.lastChapterIndex ?? 0}`
-                : `/source/${item.sourceId}/book?url=${encodeSourceRef(
-                    item.bookUrl
-                  )}&title=${encodeURIComponent(item.bookTitle)}`;
               return (
-                <li key={`${item.sourceId}-${item.bookUrl}`}>
-                  <Link to={href} className="flex items-baseline gap-2 py-2 hover:bg-muted">
-                    <span className="min-w-0 truncate text-sm font-medium">{item.bookTitle}</span>
-                    {item.sourceName && (
-                      <span className="shrink-0 text-xs text-muted-foreground">
-                        {item.sourceName}
-                      </span>
-                    )}
-                    <span className="ml-auto shrink-0 truncate text-xs text-muted-foreground">
-                      {item.lastChapterTitle
-                        ? `读到 ${item.lastChapterTitle}`
-                        : `共 ${item.chapterCount ?? "?"} 章`}
-                    </span>
-                  </Link>
-                </li>
+                <BookCard key={book.id} book={summary} seed={i} dense={view === "grid-sm"} />
               );
             })}
-          </ul>
-        </section>
-      )}
-    </div>
+          </div>
+        )}
+      </TabsContent>
+
+      <TabsContent value="source" className="mt-0">
+        {sourceEntries.length === 0 ? (
+          <p className="rounded-lg border border-border bg-surface px-3 py-6 text-center text-sm text-muted-foreground">
+            还没有收藏在线源的书。搜索时点开任意一本，在阅读页加入书架即可。
+          </p>
+        ) : view === "list" ? (
+          <div className="paper-panel grid gap-0.5 rounded-xl p-2 md:grid-cols-2">
+            {sourceEntries.map((entry) => (
+              <SourceBookRow key={entry.key} entry={entry} />
+            ))}
+          </div>
+        ) : (
+          <div className={`paper-panel rounded-xl p-3 sm:p-4 ${shelfGridClass[view]}`}>
+            {sourceEntries.map((entry, i) => (
+              <SourceBookCard
+                key={entry.key}
+                entry={entry}
+                seed={i}
+                dense={view === "grid-sm"}
+              />
+            ))}
+          </div>
+        )}
+      </TabsContent>
+    </Tabs>
   );
 }

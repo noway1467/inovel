@@ -1,10 +1,15 @@
+import { useState } from "react";
 import { Link } from "react-router";
-import { Clock3 } from "lucide-react";
+import { Library } from "lucide-react";
 import type { Route } from "./+types/history";
-import { BookListItem } from "~/components/book/book-list-item";
-import type { BookSummary } from "~/components/book/book-card";
+import {
+  ShelfBookRow,
+  SourceBookRow,
+  type SourceShelfEntry,
+} from "~/components/book/shelf-view";
 import { EmptyState } from "~/components/state/empty-state";
 import { Button } from "~/components/ui/button";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "~/components/ui/tabs";
 import { cloudflareContext } from "~/server/context";
 import { createDb } from "~/server/db";
 import { createAuth } from "~/server/auth";
@@ -47,7 +52,8 @@ export async function loader({ request, context }: Route.LoaderArgs) {
   for (const row of dedupedRows) {
     const book = bookMap.get(row.bookId);
     if (!book) continue;
-    history.push({ row, book });
+    // readAt 在这里就转成字符串：组件只要拿它算相对时间，不必关心是 Date 还是数字
+    history.push({ book, bookProgress: row.bookProgress, readAt: row.readAt.toISOString() });
   }
   return {
     user: session.user,
@@ -65,7 +71,58 @@ export async function loader({ request, context }: Route.LoaderArgs) {
   };
 }
 
+interface SourceHistoryItem {
+  sourceId: string;
+  bookUrl: string;
+  bookTitle: string;
+  sourceName: string | null;
+  lastChapterTitle: string | null;
+  lastChapterKey: string | null;
+  lastChapterIndex: number | null;
+  lastReadAt: string | null;
+}
+
+/** 相对时间：列表里"3 天前"比完整时间戳好扫 */
+function relativeTime(iso: string | null): string | null {
+  if (!iso) return null;
+  const then = new Date(iso).getTime();
+  if (!Number.isFinite(then)) return null;
+  const minutes = Math.round((Date.now() - then) / 60_000);
+  if (minutes < 1) return "刚刚";
+  if (minutes < 60) return `${minutes} 分钟前`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  const days = Math.round(hours / 24);
+  if (days < 30) return `${days} 天前`;
+  return new Date(then).toLocaleDateString("zh-CN");
+}
+
+function toSourceEntry(item: SourceHistoryItem): SourceShelfEntry {
+  const href = item.lastChapterKey
+    ? `/source/${item.sourceId}/chapter?key=${encodeSourceRef(
+        item.lastChapterKey
+      )}&title=${encodeURIComponent(item.bookTitle)}&book=${encodeSourceRef(item.bookUrl)}&i=${
+        item.lastChapterIndex ?? 0
+      }`
+    : `/source/${item.sourceId}/book?url=${encodeSourceRef(
+        item.bookUrl
+      )}&title=${encodeURIComponent(item.bookTitle)}`;
+  // 一行里塞不下"读到某章 + 何时读的"，时间更能说明这是历史
+  return {
+    key: `${item.sourceId}-${item.bookUrl}`,
+    href,
+    title: item.bookTitle,
+    sourceName: item.sourceName,
+    meta: relativeTime(item.lastReadAt) ?? item.lastChapterTitle,
+  };
+}
+
 export default function HistoryPage({ loaderData }: Route.ComponentProps) {
+  const sourceHistory = (loaderData.sourceHistory ?? []) as SourceHistoryItem[];
+  const [tab, setTab] = useState(
+    loaderData.history.length === 0 && sourceHistory.length > 0 ? "source" : "local"
+  );
+
   if (!loaderData.user) {
     return (
       <div className="mx-auto max-w-md">
@@ -82,8 +139,6 @@ export default function HistoryPage({ loaderData }: Route.ComponentProps) {
     );
   }
 
-  const sourceHistory = loaderData.sourceHistory ?? [];
-
   if (loaderData.history.length === 0 && sourceHistory.length === 0) {
     return (
       <div className="paper-panel mx-auto max-w-lg rounded-2xl p-4">
@@ -92,74 +147,66 @@ export default function HistoryPage({ loaderData }: Route.ComponentProps) {
     );
   }
 
-  return (
-    <div className="space-y-5">
-      <header className="paper-panel rounded-2xl p-5">
-        <p className="flex items-center gap-2 text-xs font-semibold tracking-[0.2em] text-primary">
-          <Clock3 className="size-4" /> 最近阅读
-        </p>
-        <h1 className="mt-2 font-serif text-2xl font-semibold">翻过的页，都留在这里</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          按最近阅读时间排列，共 {loaderData.history.length + sourceHistory.length} 本。
-        </p>
-      </header>
-      {loaderData.history.length > 0 && (
-        <section className="paper-panel grid gap-1 rounded-2xl p-3 sm:p-4 md:grid-cols-2">
-          {loaderData.history.map(({ book, row }, i) => {
-            const summary: BookSummary = {
-              id: book.id,
-              title: book.title,
-              authorName: book.authorName,
-              categoryName: book.categoryName,
-              tags: book.tags,
-              status: book.status,
-              latestChapterTitle: book.latestChapterTitle,
-              wordCount: book.wordCount,
-              updatedAt: book.updatedAt?.toISOString() ?? null,
-              coverKey: book.coverKey,
-              progress: row.bookProgress,
-            };
-            return <BookListItem key={book.id} book={summary} seed={i} />;
-          })}
-        </section>
-      )}
+  const sourceEntries = sourceHistory.map(toSourceEntry);
 
-      {/* 在线源读过的书：点进去直接回到上次那一章 */}
-      {sourceHistory.length > 0 && (
-        <section className="paper-panel rounded-2xl p-3 sm:p-4" aria-label="在线源阅读历史">
-          <h2 className="mb-2 text-sm font-semibold">在线源（{sourceHistory.length}）</h2>
-          <ul className="divide-y divide-border/60">
-            {sourceHistory.map((item) => (
-              <li key={`${item.sourceId}-${item.bookUrl}`}>
-                <Link
-                  to={
-                    item.lastChapterKey
-                      ? `/source/${item.sourceId}/chapter?key=${encodeSourceRef(
-                          item.lastChapterKey
-                        )}&title=${encodeURIComponent(item.bookTitle)}&book=${encodeSourceRef(
-                          item.bookUrl
-                        )}&i=${item.lastChapterIndex ?? 0}`
-                      : `/source/${item.sourceId}/book?url=${encodeSourceRef(
-                          item.bookUrl
-                        )}&title=${encodeURIComponent(item.bookTitle)}`
-                  }
-                  className="flex items-baseline gap-2 py-2 hover:bg-muted"
-                >
-                  <span className="min-w-0 truncate text-sm font-medium">{item.bookTitle}</span>
-                  {item.sourceName && (
-                    <span className="shrink-0 text-xs text-muted-foreground">
-                      {item.sourceName}
-                    </span>
-                  )}
-                  <span className="ml-auto shrink-0 truncate text-xs text-muted-foreground">
-                    {item.lastChapterTitle ?? ""}
-                  </span>
-                </Link>
-              </li>
+  return (
+    <Tabs value={tab} onValueChange={setTab}>
+      {/* 与书架同一条工具行：分栏 + 计数在左，去书架的入口在右 */}
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <TabsList className="h-9">
+          <TabsTrigger value="local" className="min-h-8 px-3">
+            站内书
+            <span className="ml-1.5 text-xs opacity-60">{loaderData.history.length}</span>
+          </TabsTrigger>
+          <TabsTrigger value="source" className="min-h-8 px-3">
+            在线书
+            <span className="ml-1.5 text-xs opacity-60">{sourceEntries.length}</span>
+          </TabsTrigger>
+        </TabsList>
+        <Button variant="outline" size="sm" className="ml-auto" asChild>
+          <Link to="/library">
+            <Library className="size-4" />
+            我的书架
+          </Link>
+        </Button>
+      </div>
+
+      <TabsContent value="local" className="mt-0">
+        {loaderData.history.length === 0 ? (
+          <p className="rounded-lg border border-border bg-surface px-3 py-6 text-center text-sm text-muted-foreground">
+            还没有读过站内的书。
+          </p>
+        ) : (
+          <div className="paper-panel grid gap-0.5 rounded-xl p-2 md:grid-cols-2">
+            {loaderData.history.map(({ book, bookProgress, readAt }, i) => (
+              <ShelfBookRow
+                key={book.id}
+                to={`/books/${book.id}`}
+                title={book.title}
+                authorName={book.authorName}
+                coverKey={book.coverKey}
+                seed={i}
+                progress={bookProgress}
+                meta={relativeTime(readAt)}
+              />
             ))}
-          </ul>
-        </section>
-      )}
-    </div>
+          </div>
+        )}
+      </TabsContent>
+
+      <TabsContent value="source" className="mt-0">
+        {sourceEntries.length === 0 ? (
+          <p className="rounded-lg border border-border bg-surface px-3 py-6 text-center text-sm text-muted-foreground">
+            还没有读过在线源的书。
+          </p>
+        ) : (
+          <div className="paper-panel grid gap-0.5 rounded-xl p-2 md:grid-cols-2">
+            {sourceEntries.map((entry) => (
+              <SourceBookRow key={entry.key} entry={entry} />
+            ))}
+          </div>
+        )}
+      </TabsContent>
+    </Tabs>
   );
 }

@@ -40,10 +40,13 @@ export function BookCard({
   book,
   className,
   seed = 0,
+  dense = false,
 }: {
   book: BookSummary;
   className?: string;
   seed?: number;
+  /** 小图模式：列多、卡片窄，标题字号收一档，副行只留作者 */
+  dense?: boolean;
 }) {
   const progress = Math.max(0, Math.min(100, book.progress ?? 0));
   return (
@@ -69,16 +72,24 @@ export function BookCard({
         )}
       </div>
       <div className="min-w-0 px-0.5">
-        <p className="line-clamp-1 text-sm font-semibold leading-5 group-hover:text-primary">
+        <p
+          className={cn(
+            "line-clamp-1 font-semibold group-hover:text-primary",
+            dense ? "text-xs leading-4" : "text-sm leading-5"
+          )}
+        >
           {book.title}
         </p>
         <div className="mt-0.5 flex items-center justify-between gap-1 text-[11px] text-muted-foreground">
           <span className="line-clamp-1 min-w-0">{book.authorName}</span>
-          <span className="shrink-0">
-            {progress > 0
-              ? `${Math.round(progress)}%`
-              : (book.categoryName ?? statusLabel(book.status, book.serialStatus))}
-          </span>
+          {/* 小图列窄，作者名已经快放不下，右侧那截就不挤了 */}
+          {!dense && (
+            <span className="shrink-0">
+              {progress > 0
+                ? `${Math.round(progress)}%`
+                : (book.categoryName ?? statusLabel(book.status, book.serialStatus))}
+            </span>
+          )}
         </div>
       </div>
     </Link>

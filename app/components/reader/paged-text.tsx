@@ -23,6 +23,16 @@ export interface PagedTextProps {
    * 正文被推到列外，看着就是"HTML 有内容但整页空白"。
    */
   lineHeight: number;
+  /**
+   * 正文每侧留白，任何合法的 CSS 长度表达式。
+   *
+   * 加在段落上而不是容器上：容器本身是多列，给它加内边距每一列都会重复一遍。
+   * 段落的包含块是列盒（列宽 = 页宽），所以百分数正好按正文宽度算。
+   * 由 resolveSideInset(settings) 生成，与本地阅读器同一把尺子。
+   */
+  sideInset?: string;
+  /** 段距，与 ReaderSettings.paragraphSpacing 同一约定：百分数（80 表示 0.8em） */
+  paragraphSpacing?: number;
   /** 页数与当前页变化时回调，供外层渲染页码与上下页按钮 */
   onPaginationChange?: (state: { pageIndex: number; pageCount: number }) => void;
   /** 外层控制翻页用；受控值变化时跟随 */
@@ -39,6 +49,8 @@ export function PagedText({
   heading,
   fontSize,
   lineHeight,
+  sideInset = "0.75rem",
+  paragraphSpacing = 80,
   pageIndex,
   pageCount: _ignored,
   onPageIndexChange,
@@ -81,7 +93,17 @@ export function PagedText({
     measurePages();
     const frame = requestAnimationFrame(measurePages);
     return () => cancelAnimationFrame(frame);
-  }, [size.width, size.height, fontSize, resolvedLineHeight, paragraphs, heading]);
+    // 留白与段距一变，每页装的字就变了，页数必须重量
+  }, [
+    size.width,
+    size.height,
+    fontSize,
+    resolvedLineHeight,
+    sideInset,
+    paragraphSpacing,
+    paragraphs,
+    heading,
+  ]);
 
   // 页数变化后当前页可能越界（例如放大字号导致页数变多/变少）
   useEffect(() => {
@@ -164,9 +186,24 @@ export function PagedText({
             : { fontSize: `${fontSize}px`, lineHeight: resolvedLineHeight }
         }
       >
-        {heading && <h1 className="mb-6 text-center text-[1.3em] font-semibold">{heading}</h1>}
+        {heading && (
+          <h1
+            className="mb-6 text-center text-[1.3em] font-semibold"
+            style={{ marginLeft: sideInset, marginRight: sideInset, textIndent: 0 }}
+          >
+            {heading}
+          </h1>
+        )}
         {paragraphs.map((text, index) => (
-          <p key={`p${index}`} className="mb-4 indent-[2em]">
+          <p
+            key={`p${index}`}
+            className="indent-[2em]"
+            style={{
+              marginLeft: sideInset,
+              marginRight: sideInset,
+              marginBottom: `${paragraphSpacing / 100}em`,
+            }}
+          >
             {text}
           </p>
         ))}

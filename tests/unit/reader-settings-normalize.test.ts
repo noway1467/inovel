@@ -3,8 +3,11 @@ import {
   defaultReaderSettings,
   normalizePaginationMode,
   normalizeReaderTheme,
+  normalizeSideMargin,
   resolveLineHeight,
   resolveReaderTheme,
+  resolveSideInset,
+  sideMarginRange,
 } from "~/components/reader/reader-settings";
 
 describe("normalizeReaderTheme", () => {
@@ -77,5 +80,65 @@ describe("normalizePaginationMode", () => {
 
   it("可以指定回退值", () => {
     expect(normalizePaginationMode("page-turn", "cover")).toBe("cover");
+  });
+});
+
+describe("normalizeSideMargin", () => {
+  it("放行区间内的值", () => {
+    for (let value = sideMarginRange.min; value <= sideMarginRange.max; value += 1) {
+      expect(normalizeSideMargin(value)).toBe(value);
+    }
+  });
+
+  it("越界的值夹回区间", () => {
+    expect(normalizeSideMargin(-10)).toBe(sideMarginRange.min);
+    expect(normalizeSideMargin(999)).toBe(sideMarginRange.max);
+  });
+
+  it("老版本存的设置里没有这个字段，回退到默认值", () => {
+    expect(normalizeSideMargin(undefined)).toBe(defaultReaderSettings.sideMargin);
+    expect(normalizeSideMargin(null)).toBe(defaultReaderSettings.sideMargin);
+    expect(normalizeSideMargin("很宽")).toBe(defaultReaderSettings.sideMargin);
+    expect(normalizeSideMargin(Number.NaN)).toBe(defaultReaderSettings.sideMargin);
+  });
+});
+
+describe("resolveSideInset", () => {
+  it("把用户调的比例写进 max()，任何屏宽都生效", () => {
+    const inset = resolveSideInset({ ...defaultReaderSettings, sideMargin: 12 });
+    expect(inset).toContain("12%");
+  });
+
+  it("同时带上行长上限那一项，宽屏上把行压短", () => {
+    // 三个约束取最大：留白下限、用户比例、(100% - 行长上限)/2
+    const inset = resolveSideInset({ ...defaultReaderSettings, margin: "standard" });
+    expect(inset).toContain("calc((100% - 68rem) / 2)");
+  });
+
+  it("行长上限随「正文宽度」变化，窄档正文最窄", () => {
+    const narrow = resolveSideInset({ ...defaultReaderSettings, margin: "narrow" });
+    const wide = resolveSideInset({ ...defaultReaderSettings, margin: "wide" });
+    // 此前这张表是反的：选「窄」给的是 96rem，行反而更长
+    expect(narrow).toContain("52rem");
+    expect(wide).toContain("88rem");
+  });
+
+  it("留白调到 0 也保留下限，正文不贴屏幕边", () => {
+    const inset = resolveSideInset({ ...defaultReaderSettings, sideMargin: 0 });
+    expect(inset).toContain("0.75rem");
+  });
+
+  it("下限可以按调用方的容器改", () => {
+    expect(resolveSideInset(defaultReaderSettings, "1rem")).toContain("1rem");
+  });
+
+  it("存进来的非法比例也不会漏进 CSS", () => {
+    // 直接拼进 max() 的话，NaN% 会让整条声明失效，留白全丢
+    const inset = resolveSideInset({
+      ...defaultReaderSettings,
+      sideMargin: Number.NaN,
+    });
+    expect(inset).not.toContain("NaN");
+    expect(inset).toContain(`${defaultReaderSettings.sideMargin}%`);
   });
 });

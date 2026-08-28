@@ -22,6 +22,7 @@ import {
   normalizeReaderTheme,
   resolveLineHeight,
   resolveReaderTheme,
+  resolveSideInset,
   systemDarkQuery,
   saveLocalProgress,
   saveReaderSettings,
@@ -38,20 +39,6 @@ import { getPreferences, getProgress } from "~/server/services/reader";
 import { getChapterContent } from "~/server/storage/chapter-content";
 import { chapterVersionKey } from "~/server/storage/keys";
 import { loginRedirectTo } from "~/server/http/request-path";
-
-// 分页模式每屏即一整页，正文宽度按目标行长自适应；滚动模式单独用安全边距。
-// 行长上限放宽（窄 96rem / 标准 80rem / 宽 66rem），减少两侧留白提高单页容量
-const pageMarginPx: Record<ReaderSettings["margin"], string> = {
-  narrow: "max(0.75rem, calc((100vw - 96rem) / 2))",
-  standard: "max(1rem, calc((100vw - 80rem) / 2))",
-  wide: "max(1.25rem, calc((100vw - 66rem) / 2))",
-};
-
-const scrollMarginPx: Record<ReaderSettings["margin"], string> = {
-  narrow: "clamp(0.75rem, 2vw, 1.75rem)",
-  standard: "clamp(1rem, 4vw, 3rem)",
-  wide: "clamp(1.25rem, 7vw, 5.5rem)",
-};
 
 export async function loader({ params, request, context }: Route.LoaderArgs) {
   const { env } = context.get(cloudflareContext);
@@ -618,6 +605,14 @@ export default function ReaderPage({ loaderData }: Route.ComponentProps) {
     textIndent: settings.indent === "2char" ? "2em" : "0",
   };
 
+  /**
+   * 正文左右留白。
+   *
+   * 分页模式加在段落上（容器本身是多列，给容器加内边距会被每一列重复），
+   * 滚动模式加在 article 上。两处都用同一个表达式，切换翻页模式时留白不变。
+   */
+  const sideInset = resolveSideInset(settings);
+
   // 上下栏同进同出：去掉 uiZone 后不再有"只亮顶部/只亮底部"的边缘悬停态
   const headerVisible = uiVisible;
   const footerVisible = uiVisible;
@@ -728,8 +723,8 @@ export default function ReaderPage({ loaderData }: Route.ComponentProps) {
               <h1
                 className="mb-8 text-center text-[1.4em] font-semibold"
                 style={{
-                  marginLeft: pageMarginPx[settings.margin],
-                  marginRight: pageMarginPx[settings.margin],
+                  marginLeft: sideInset,
+                  marginRight: sideInset,
                   textIndent: 0,
                   letterSpacing: 0,
                 }}
@@ -743,8 +738,8 @@ export default function ReaderPage({ loaderData }: Route.ComponentProps) {
                   data-paragraph-id={paragraph.id}
                   style={{
                     marginBottom: `${settings.paragraphSpacing / 100}em`,
-                    marginLeft: pageMarginPx[settings.margin],
-                    marginRight: pageMarginPx[settings.margin],
+                    marginLeft: sideInset,
+                    marginRight: sideInset,
                   }}
                 >
                   {paragraph.text}
@@ -765,12 +760,15 @@ export default function ReaderPage({ loaderData }: Route.ComponentProps) {
             </p>
           </>
         ) : (
+          // 不套 max-w + mx-auto：内边距的百分数按包含块（这里是 main）宽度解析，
+          // 而 max-w 会让 article 比 main 窄，两个宽度不一致时留白就对不上 ——
+          // 正文宽度改由 sideInset 里的行长上限收，与分页模式同一把尺子。
           <article
-            className="reader-body mx-auto min-h-full max-w-[1360px]"
+            className="reader-body min-h-full w-full"
             style={{
               ...bodyStyle,
-              paddingLeft: scrollMarginPx[settings.margin],
-              paddingRight: scrollMarginPx[settings.margin],
+              paddingLeft: sideInset,
+              paddingRight: sideInset,
             }}
           >
             <h1

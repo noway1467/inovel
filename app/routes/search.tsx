@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Form, Link, useSearchParams } from "react-router";
-import { Compass, Loader2, Pause, Play, Search } from "lucide-react";
+import { Compass, Loader2, Pause, Play, Search, X } from "lucide-react";
 import type { Route } from "./+types/search";
 import { BookListItem } from "~/components/book/book-list-item";
 import type { BookSummary } from "~/components/book/book-card";
@@ -9,6 +9,7 @@ import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import { EmptyState } from "~/components/state/empty-state";
 import { eq, sql } from "drizzle-orm";
+import { cn } from "~/lib/utils";
 import { encodeSourceRef } from "~/lib/source-ref";
 import { bestPreciseSourceCount, groupKey } from "~/lib/book-match";
 import { contentSources } from "drizzle/schema";
@@ -180,6 +181,14 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
    * 用户看着有 5 条线路却一条也读不了，还没法让它继续找。
    */
   const [satisfied, setSatisfied] = useState(false);
+  /**
+   * 用户主动取消了这一轮搜索。
+   *
+   * 与 paused 分开：暂停是"先停一下，等下继续"，取消是"这本我不搜了" ——
+   * 停掉之后不再显示暂停/继续，只留一个「重新搜索」。原先没有这个出口，
+   * 循环会一直往下打源，用户要么等它自己停，要么离开页面。
+   */
+  const [cancelled, setCancelled] = useState(false);
   const [error, setError] = useState("");
   /**
    * 当前这一轮要攒够几个精准源。
@@ -208,6 +217,7 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
     setPaused(false);
     setDone(false);
     setSatisfied(false);
+    setCancelled(false);
     setError("");
     setTarget(enoughSourcesForOneBook);
     pausedRef.current = false;
@@ -327,8 +337,33 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
     setTarget(targetRef.current);
     autoBatchesRef.current = Math.max(autoBatchesRef.current, maxAutoBatches);
     setSatisfied(false);
+    setCancelled(false);
+    cancelledRef.current = false;
     pausedRef.current = false;
     setPaused(false);
+    void runLoop();
+  }
+
+  /**
+   * 取消搜索：把循环彻底停下。
+   *
+   * cancelledRef 是循环每次迭代都会看的那面旗子，置起来后当前这一批返回即止。
+   * 已经查到的结果留在页面上 —— 用户要的是"别再往下打源了"，
+   * 不是"把结果清掉"。想再搜按同一位置继续。
+   */
+  function stopSearch() {
+    cancelledRef.current = true;
+    pausedRef.current = false;
+    setCancelled(true);
+    setPaused(false);
+  }
+
+  /** 取消之后重新开搜：从上次的 offset 接着走，已查过的源不重复打 */
+  function resumeSearch() {
+    setCancelled(false);
+    cancelledRef.current = false;
+    autoBatchesRef.current = Math.max(autoBatchesRef.current, maxAutoBatches);
+    setSatisfied(false);
     void runLoop();
   }
 
@@ -343,16 +378,18 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
     );
   }
 
-  const running = loading || (!paused && !done && !satisfied && nextOffset !== null);
+  const running = loading || (!paused && !cancelled && !done && !satisfied && nextOffset !== null);
   /** 还有源没查完，且当前是停着的 —— 这时才给「继续搜索」 */
-  const canContinue = satisfied && nextOffset !== null && !loading;
+  const canContinue = satisfied && !cancelled && nextOffset !== null && !loading;
   /**
    * 暂停按钮的显示条件。
    *
    * 只要还有源没查完、且不是停在 satisfied 上，就该给暂停 ——
    * 包括「继续搜索」跑起来之后：那一段现在也是循环，同样得能中途叫停。
    */
-  const canPause = nextOffset !== null && !done && !satisfied;
+  const canPause = nextOffset !== null && !done && !satisfied && !cancelled;
+  /** 取消：只要循环还可能往下跑就给，取消后换成「重新搜索」 */
+  const canStop = !cancelled && !done && nextOffset !== null;
 
   return (
     <section>
@@ -368,15 +405,17 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
             「已够用」只在真的攒够时说。satisfied 也包含"手动那一批跑完了"，
             那种情况下并没有搜够，标成已够用会让用户以为不必再点继续。
           */}
-          {paused
-            ? " · 已暂停"
-            : done
-              ? " · 已查完"
-              : satisfied
-                ? hasEnough(books, target)
-                  ? ` · 已够用（${bestPreciseSourceCount(books)} 个精准源）`
-                  : " · 已暂停"
-                : ""}
+          {cancelled
+            ? " · 已取消"
+            : paused
+              ? " · 已暂停"
+              : done
+                ? " · 已查完"
+                : satisfied
+                  ? hasEnough(books, target)
+                    ? ` · 已够用（${bestPreciseSourceCount(books)} 个精准源）`
+                    : " · 已暂停"
+                  : ""}
         </span>
 
         {/*
@@ -408,6 +447,35 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
                 暂停
               </>
             )}
+          </Button>
+        )}
+
+        {/*
+          取消搜索。暂停只是挂起，循环还在等着接着打源；这个 X 直接把它停死。
+          之前唯一的出路是换关键词或离开页面，一本书能一直搜下去。
+        */}
+        {canStop && (
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="size-7 shrink-0 text-muted-foreground"
+            aria-label="取消搜索"
+            title="取消搜索"
+            onClick={stopSearch}
+          >
+            <X className="size-3.5" />
+          </Button>
+        )}
+
+        {cancelled && nextOffset !== null && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 shrink-0 px-2"
+            onClick={resumeSearch}
+          >
+            <Play className="size-3.5" />
+            重新搜索
           </Button>
         )}
       </div>
@@ -503,8 +571,26 @@ export default function SearchPage({ loaderData }: Route.ComponentProps) {
             placeholder="搜索书名、作者、标签"
             aria-label="搜索书名、作者、标签"
             autoFocus
-            className="h-10 pl-10"
+            className={cn("h-10 pl-10", query && "pr-10")}
           />
+          {/*
+            清空关键词。走链接而不是清 input：搜索结果由 URL 上的 q 决定，
+            只把输入框擦掉的话页面还停在上一次的结果上。
+          */}
+          {query && (
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              className="absolute right-1 top-1/2 size-8 -translate-y-1/2 text-muted-foreground"
+              aria-label="清空搜索"
+              title="清空搜索"
+              asChild
+            >
+              <Link to="/search">
+                <X className="size-4" />
+              </Link>
+            </Button>
+          )}
         </div>
       </Form>
 

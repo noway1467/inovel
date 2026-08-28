@@ -69,6 +69,14 @@ export interface ReaderSettings {
   lineHeight: number;
   paragraphSpacing: number;
   margin: "narrow" | "standard" | "wide";
+  /**
+   * 左右留白，占正文容器宽度的百分数（6 表示每侧留 6%）。
+   *
+   * 与 margin 分工：margin 是「行长上限」，只在宽屏上起作用；
+   * sideMargin 每种屏宽都生效，手机上也能把正文从边缘收回来。
+   * 两者取较大的那个，见 resolveSideInset。
+   */
+  sideMargin: number;
   align: "justify" | "left";
   indent: "none" | "2char";
   letterSpacing: "default" | "wide";
@@ -82,11 +90,66 @@ export const defaultReaderSettings: ReaderSettings = {
   lineHeight: 180,
   paragraphSpacing: 80,
   margin: "standard",
+  sideMargin: 6,
   align: "justify",
   indent: "2char",
   letterSpacing: "default",
   paginationMode: "cover",
 };
+
+export const sideMarginRange = { min: 0, max: 20, step: 1 } as const;
+
+/**
+ * 左右留白的合法范围是 0~20%，超出就夹回区间，非数字回落到默认值。
+ *
+ * 只认真正的数字和数字字符串：`Number(null)`、`Number("")`、`Number([])`
+ * 全是 0，一律走 Number() 的话，存坏的字段会被当成"留白 0%"当真用上，
+ * 正文贴着屏幕边而设置面板显示 0 —— 看着像用户自己调的，不像数据坏了。
+ */
+export function normalizeSideMargin(
+  value: unknown,
+  fallback: number = defaultReaderSettings.sideMargin
+): number {
+  const numeric =
+    typeof value === "number"
+      ? value
+      : typeof value === "string" && value.trim() !== ""
+        ? Number(value)
+        : Number.NaN;
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.min(sideMarginRange.max, Math.max(sideMarginRange.min, Math.round(numeric)));
+}
+
+/**
+ * 行长上限。
+ *
+ * 名字对应的是「正文有多宽」：窄档正文最窄、留白最多。此前这张表是反的
+ * （narrow 给 96rem，即最宽的正文），选「窄」反而让行更长。
+ *
+ * 数值按中文一行多少字定：18px 字号下 68rem ≈ 60 字，是长文里还跟得住的上界；
+ * 原来的 80~96rem 到 70~85 字，一行读完眼睛要横扫大半个屏幕，回行也容易串行。
+ */
+const bodyWidthCap: Record<ReaderSettings["margin"], string> = {
+  narrow: "52rem",
+  standard: "68rem",
+  wide: "88rem",
+};
+
+/**
+ * 算出正文每侧该留多少空白，给 margin-inline / padding-inline 用。
+ *
+ * 三个约束取最大值：
+ *  - `floor`：最小留白，手机上不让文字贴边（也是 0% 时的兜底）
+ *  - `sideMargin%`：用户直接调的比例，任何屏宽都生效
+ *  - `(100% - 行长上限) / 2`：宽屏上把行长压到可读范围
+ *
+ * 百分数按包含块宽度解析：分页模式下子元素的包含块就是多列的列盒
+ * （列宽 = 页宽），滚动模式下是 article 自身宽度，两处都正好是正文宽度。
+ */
+export function resolveSideInset(settings: ReaderSettings, floor = "0.75rem"): string {
+  const pct = normalizeSideMargin(settings.sideMargin);
+  return `max(${floor}, ${pct}%, calc((100% - ${bodyWidthCap[settings.margin]}) / 2))`;
+}
 
 export const readerThemes: { key: ReaderTheme; label: string; swatch: string }[] = [
   // 半白半黑的色块，示意会跟着系统在浅色/深色之间切
@@ -113,6 +176,8 @@ export function loadReaderSettings(): ReaderSettings {
       ...parsed,
       theme: normalizeReaderTheme(parsed.theme),
       paginationMode: normalizePaginationMode(parsed.paginationMode),
+      // 老版本存的设置里没有这个字段，展开后会是 undefined
+      sideMargin: normalizeSideMargin(parsed.sideMargin),
     };
   } catch {
     return defaultReaderSettings;

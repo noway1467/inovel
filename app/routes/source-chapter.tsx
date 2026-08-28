@@ -24,6 +24,7 @@ import {
   normalizePaginationMode,
   normalizeReaderTheme,
   resolveReaderTheme,
+  resolveSideInset,
   saveReaderSettings,
   systemDarkQuery,
   type ReaderSettings,
@@ -424,9 +425,13 @@ export default function SourceChapterPage({ loaderData }: Route.ComponentProps) 
         </div>
       </header>
 
-      {/* 正文占满整屏，上下留出安全边距免得被浮栏压住首末行 */}
+      {/*
+        正文占满整屏，上下留出安全边距免得被浮栏压住首末行。
+        左右不给内边距：留白全由阅读设置的「左右留白」控制（自带 0.75rem 下限），
+        这里再叠一层 px-3 的话滑到 0% 也收不回来。
+      */}
       <main
-        className="relative z-0 min-h-0 flex-1 px-3"
+        className="relative z-0 min-h-0 flex-1"
         style={{
           paddingTop: "max(3.25rem,env(safe-area-inset-top))",
           paddingBottom: "max(3.25rem,env(safe-area-inset-bottom))",
@@ -438,6 +443,9 @@ export default function SourceChapterPage({ loaderData }: Route.ComponentProps) 
           heading={nav?.title ?? null}
           fontSize={settings.fontSize}
           lineHeight={settings.lineHeight}
+          // 左右留白与行长上限，与本地阅读器同一套设置
+          sideInset={resolveSideInset(settings)}
+          paragraphSpacing={settings.paragraphSpacing}
           pageIndex={pageIndex}
           onPageIndexChange={setPageIndex}
           onPaginationChange={setPagination}
