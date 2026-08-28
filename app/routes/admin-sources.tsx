@@ -68,6 +68,22 @@ interface SubscriptionRow {
   lastError: string | null;
 }
 
+/** 书源订阅：一个清单地址，按间隔重拉，跟上清单作者的更新 */
+interface RepoRow {
+  id: string;
+  name: string;
+  url: string;
+  status: string;
+  syncIntervalMinutes: number;
+  lastSyncAt: string | null;
+  lastSyncStatus: string | null;
+  lastSyncMessage: string | null;
+  consecutiveFailures: number;
+  lastCreatedCount: number;
+  lastUpdatedCount: number;
+  sourceCount: number;
+}
+
 interface RunRow {
   id: string;
   sourceName: string;
@@ -111,6 +127,7 @@ export default function AdminSourcesPage({ loaderData }: Route.ComponentProps) {
   const [adapters, setAdapters] = useState<AdapterInfo[]>([]);
   const [domains, setDomains] = useState<DomainRow[]>([]);
   const [subscriptions, setSubscriptions] = useState<SubscriptionRow[]>([]);
+  const [repos, setRepos] = useState<RepoRow[]>([]);
   const [runs, setRuns] = useState<RunRow[]>([]);
   const [restrictionEnabled, setRestrictionEnabled] = useState(false);
   const [verifyOverview, setVerifyOverview] = useState<VerifyOverview | null>(null);
@@ -133,11 +150,12 @@ export default function AdminSourcesPage({ loaderData }: Route.ComponentProps) {
     if (filter.verifyStatus) params.set("verifyStatus", filter.verifyStatus);
     const listUrl = `/api/admin/sources/list${params.toString() ? `?${params}` : ""}`;
 
-    const [main, domainRes, subRes, runRes] = (await Promise.all([
+    const [main, domainRes, subRes, runRes, repoRes] = (await Promise.all([
       fetch(listUrl).then((r) => r.json()),
       fetch("/api/admin/sources/domains").then((r) => r.json()),
       fetch("/api/admin/sources/subscriptions").then((r) => r.json()),
       fetch("/api/admin/sources/runs").then((r) => r.json()),
+      fetch("/api/admin/sources/repos").then((r) => r.json()),
     ])) as [
       {
         sources?: SourceRow[];
@@ -148,6 +166,7 @@ export default function AdminSourcesPage({ loaderData }: Route.ComponentProps) {
       { domains?: DomainRow[]; restrictionEnabled?: boolean },
       { subscriptions?: SubscriptionRow[] },
       { runs?: RunRow[] },
+      { repos?: RepoRow[] },
     ];
     setSources(main.sources ?? []);
     setAdapters(main.adapters ?? []);
@@ -157,6 +176,7 @@ export default function AdminSourcesPage({ loaderData }: Route.ComponentProps) {
     setRestrictionEnabled(Boolean(domainRes.restrictionEnabled));
     setSubscriptions(subRes.subscriptions ?? []);
     setRuns(runRes.runs ?? []);
+    setRepos(repoRes.repos ?? []);
   }, [isAdmin, filter]);
 
   useEffect(() => {
@@ -203,18 +223,20 @@ export default function AdminSourcesPage({ loaderData }: Route.ComponentProps) {
   }
 
   return (
-    <div className="space-y-5">
-      <header>
-        <h1 className="text-xl font-semibold">在线源</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          导入源、订阅书籍、按间隔自动更新。抓取前必须先在「域名授权」登记你有权抓取的站点。
-        </p>
-      </header>
+    /*
+      间距收紧：space-y-5 -> space-y-3，标题去掉副标题段。
 
-      <p className="rounded-lg border border-border bg-surface/60 p-3 text-xs text-muted-foreground">
-        源导入后立即可用。同步来的章节先落草稿，你确认后再发布。
-        出站请求有体积（2MB）、超时（15s）与频率（1s 间隔）上限，内网与回环地址一律拒绝。
-      </p>
+      原先顶部两段说明文字（副标题 + 安全边界提示）占掉近三行，
+      而这是个常来的管理页，说明只在第一次有用。安全边界那段挪进
+      「域名限定」页签 —— 那里才是设置它的地方。
+    */
+    <div className="space-y-3">
+      <header className="flex flex-wrap items-center justify-between gap-2">
+        <h1 className="text-lg font-semibold">在线源</h1>
+        <span className="text-xs text-muted-foreground">
+          抓取前需在「域名限定」登记有权抓取的站点
+        </span>
+      </header>
 
       {message && (
         <p role="status" className="rounded-md bg-secondary px-3 py-2 text-sm">
@@ -276,9 +298,27 @@ export default function AdminSourcesPage({ loaderData }: Route.ComponentProps) {
               setBatchResult(data);
             }}
           />
-          <SourceCreateForm adapters={adapters} busy={busy} onSubmit={(body) =>
-            call("/api/admin/sources/create", { method: "POST", body: JSON.stringify(body) }, "源已登记")
-          } />
+          {/*
+            原先这里是「登记新源」手工表单。规则源必须带规则、只能靠导入产生，
+            手工能填的只剩 opds 这类，几乎没人用。换成书源订阅：
+            存下清单地址，之后清单作者修规则、加站点，到期自动重拉。
+          */}
+          <SourceRepoPanel
+            repos={repos}
+            busy={busy}
+            onAdd={(body) =>
+              call("/api/admin/sources/repos", { method: "POST", body: JSON.stringify(body) }, "订阅已添加并完成首次拉取")
+            }
+            onSync={(repoId) =>
+              call("/api/admin/sources/repos", { method: "POST", body: JSON.stringify({ repoId, op: "sync" }) }, "已重拉清单")
+            }
+            onToggle={(repoId, status) =>
+              call("/api/admin/sources/repos", { method: "PATCH", body: JSON.stringify({ repoId, status }) }, status === "paused" ? "已暂停自动更新" : "已恢复自动更新")
+            }
+            onRemove={(repoId) =>
+              call("/api/admin/sources/repos", { method: "DELETE", body: JSON.stringify({ repoId }) }, "已移除订阅（已导入的源保留）")
+            }
+          />
           <SourceFilterBar
             filter={filter}
             adapters={adapters}
@@ -506,84 +546,155 @@ export default function AdminSourcesPage({ loaderData }: Route.ComponentProps) {
   );
 }
 
-function SourceCreateForm({
-  adapters,
+/** 间隔选项。下限 6 小时：清单挂在别人的服务器上，刷太勤没意义也不礼貌。 */
+const repoIntervals = [
+  { value: "360", label: "6 小时" },
+  { value: "720", label: "12 小时" },
+  { value: "1440", label: "每天" },
+  { value: "4320", label: "每 3 天" },
+  { value: "10080", label: "每周" },
+];
+
+function SourceRepoPanel({
+  repos,
   busy,
-  onSubmit,
+  onAdd,
+  onSync,
+  onToggle,
+  onRemove,
 }: {
-  adapters: AdapterInfo[];
+  repos: RepoRow[];
   busy: boolean;
-  onSubmit: (body: Record<string, unknown>) => Promise<unknown>;
+  onAdd: (body: Record<string, unknown>) => Promise<unknown>;
+  onSync: (repoId: string) => Promise<unknown>;
+  onToggle: (repoId: string, status: "active" | "paused") => Promise<unknown>;
+  onRemove: (repoId: string) => Promise<unknown>;
 }) {
-  // 规则源必须带规则，只能靠导入书源 JSON 产生，不在手工登记的选项里
-  const manualKinds = adapters.filter((adapter) => adapter.kind !== "rules");
-  const [kind, setKind] = useState("opds");
+  const [open, setOpen] = useState(false);
+  const [url, setUrl] = useState("");
   const [name, setName] = useState("");
-  const [endpoint, setEndpoint] = useState("");
-  const [interval, setInterval] = useState("360");
+  const [interval, setInterval] = useState("1440");
 
   return (
-    <section className="rounded-lg border border-border bg-surface p-4">
-      <h2 className="flex items-center gap-2 text-base font-semibold">
-        <Plus className="size-4" />
-        登记新源
-      </h2>
-      <div className="mt-3 grid gap-3 sm:grid-cols-2">
-        <div className="space-y-1.5">
-          <Label htmlFor="src-kind">类型</Label>
-          <Select value={kind} onValueChange={setKind}>
-            <SelectTrigger id="src-kind">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {manualKinds.map((adapter) => (
-                <SelectItem key={adapter.kind} value={adapter.kind}>
-                  {adapter.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-        <div className="space-y-1.5">
-          <Label htmlFor="src-name">名称</Label>
-          <Input id="src-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="我的书库" />
-        </div>
-        <div className="space-y-1.5 sm:col-span-2">
-          <Label htmlFor="src-endpoint">入口地址</Label>
-          <Input
-            id="src-endpoint"
-            value={endpoint}
-            onChange={(e) => setEndpoint(e.target.value)}
-            placeholder="https://books.example.com/opds"
-          />
-        </div>
-        <div className="space-y-1.5">
-          <Label htmlFor="src-interval">同步间隔（分钟）</Label>
-          <Input
-            id="src-interval"
-            type="number"
-            min={30}
-            max={10080}
-            value={interval}
-            onChange={(e) => setInterval(e.target.value)}
-          />
-        </div>
+    <section className="paper-panel rounded-lg p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="flex items-center gap-2 text-sm font-semibold">
+          <CloudDownload className="size-4" />
+          书源订阅
+          {repos.length > 0 && (
+            <span className="text-xs font-normal text-muted-foreground">
+              {repos.length} 个清单 · 共 {repos.reduce((sum, repo) => sum + repo.sourceCount, 0)} 个源
+            </span>
+          )}
+        </h2>
+        <Button variant={open ? "secondary" : "outline"} size="sm" onClick={() => setOpen((prev) => !prev)}>
+          <Plus className="size-4" />
+          添加订阅
+        </Button>
       </div>
-      <Button
-        className="mt-3"
-        disabled={busy || !name.trim() || !endpoint.trim()}
-        onClick={() =>
-          void onSubmit({
-            name,
-            kind,
-            endpoint,
-            syncIntervalMinutes: Number(interval) || 360,
-          })
-        }
-      >
-        {busy && <Loader2 className="size-4 animate-spin" />}
-        登记
-      </Button>
+
+      {open && (
+        <div className="mt-3 grid gap-2.5 sm:grid-cols-[1fr_auto_auto] sm:items-end">
+          <div className="space-y-1.5 sm:col-span-3">
+            <Label htmlFor="repo-url">清单地址</Label>
+            <Input
+              id="repo-url"
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              placeholder="https://example.com/sources.json，或直接粘贴 legado:// 分享链接"
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="repo-name">备注名（可留空）</Label>
+            <Input id="repo-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="按地址自动取名" />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="repo-interval">更新频率</Label>
+            <Select value={interval} onValueChange={setInterval}>
+              <SelectTrigger id="repo-interval" className="w-32">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {repoIntervals.map((item) => (
+                  <SelectItem key={item.value} value={item.value}>
+                    {item.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <Button
+            disabled={busy || !url.trim()}
+            onClick={async () => {
+              await onAdd({ url, name: name.trim() || null, syncIntervalMinutes: Number(interval) });
+              setUrl("");
+              setName("");
+              setOpen(false);
+            }}
+          >
+            {busy && <Loader2 className="size-4 animate-spin" />}
+            添加并拉取
+          </Button>
+        </div>
+      )}
+
+      {repos.length === 0 ? (
+        <p className="mt-2 text-xs text-muted-foreground">
+          添加一个书源清单地址，之后清单更新（作者修了规则、加了站点）会按设定的频率自动跟上。
+        </p>
+      ) : (
+        <ul className="mt-3 space-y-2">
+          {repos.map((repo) => (
+            <li key={repo.id} className="paper-row rounded-md p-2.5">
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <p className="truncate text-sm font-medium">{repo.name}</p>
+                    {repo.status === "paused" && (
+                      <Badge variant="secondary" className="shrink-0">
+                        已暂停
+                      </Badge>
+                    )}
+                    {repo.lastSyncStatus === "failed" && (
+                      <Badge variant="danger" className="shrink-0">
+                        上次失败{repo.consecutiveFailures > 1 ? ` ×${repo.consecutiveFailures}` : ""}
+                      </Badge>
+                    )}
+                  </div>
+                  <p className="truncate text-xs text-muted-foreground">{repo.url}</p>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    {repo.sourceCount} 个源
+                    {" · "}
+                    {repoIntervals.find((item) => item.value === String(repo.syncIntervalMinutes))?.label ??
+                      `${repo.syncIntervalMinutes} 分钟`}
+                    {repo.lastSyncAt && ` · ${new Date(repo.lastSyncAt).toLocaleString("zh-CN")}`}
+                    {repo.lastSyncMessage && ` · ${repo.lastSyncMessage}`}
+                  </p>
+                </div>
+                <div className="flex shrink-0 items-center gap-1">
+                  <Button variant="ghost" size="sm" disabled={busy} onClick={() => void onSync(repo.id)}>
+                    <RefreshCw className="size-4" />
+                    立即更新
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={busy}
+                    onClick={() => void onToggle(repo.id, repo.status === "paused" ? "active" : "paused")}
+                  >
+                    {repo.status === "paused" ? <RefreshCw className="size-4" /> : <Pause className="size-4" />}
+                    {repo.status === "paused" ? "恢复" : "暂停"}
+                  </Button>
+                  <Button variant="ghost" size="sm" disabled={busy} onClick={() => void onRemove(repo.id)}>
+                    <Trash2 className="size-4" />
+                    移除
+                  </Button>
+                </div>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
     </section>
   );
 }
@@ -1219,9 +1330,18 @@ function SourceFilterBar({
   onChange: (next: SourceFilter) => void;
 }) {
   return (
-    <div className="flex flex-wrap items-end gap-2 rounded-lg border border-border bg-surface p-3">
-      <div className="min-w-48 flex-1 space-y-1.5">
-        <Label htmlFor="flt-q">按名称或地址搜索</Label>
+    /*
+      栅格而不是 flex-wrap。
+
+      原先四个筛选器 flex-wrap 排一行，后三个写死 w-40：窄屏下前面的
+      搜索框按 flex-1 吃掉剩余宽度，最后的「可用性」被挤到看不见。
+      改成 2 列（窄）/ 4 列（宽）的栅格，每格等宽，谁都不会被压掉。
+    */
+    <div className="paper-panel grid grid-cols-2 items-end gap-2.5 rounded-lg p-3 sm:grid-cols-4 lg:grid-cols-[minmax(12rem,1.6fr)_repeat(3,minmax(7rem,1fr))_auto]">
+      <div className="col-span-2 space-y-1 sm:col-span-4 lg:col-span-1">
+        <Label htmlFor="flt-q" className="text-xs">
+          名称或地址
+        </Label>
         <Input
           id="flt-q"
           value={filter.q}
@@ -1229,8 +1349,10 @@ function SourceFilterBar({
           placeholder="源名称或域名"
         />
       </div>
-      <div className="w-40 space-y-1.5">
-        <Label htmlFor="flt-kind">类型</Label>
+      <div className="space-y-1">
+        <Label htmlFor="flt-kind" className="text-xs">
+          类型
+        </Label>
         <Select
           value={filter.kind || "all"}
           onValueChange={(value) => onChange({ ...filter, kind: value === "all" ? "" : value })}
@@ -1248,8 +1370,10 @@ function SourceFilterBar({
           </SelectContent>
         </Select>
       </div>
-      <div className="w-40 space-y-1.5">
-        <Label htmlFor="flt-status">状态</Label>
+      <div className="space-y-1">
+        <Label htmlFor="flt-status" className="text-xs">
+          状态
+        </Label>
         <Select
           value={filter.status || "all"}
           onValueChange={(value) => onChange({ ...filter, status: value === "all" ? "" : value })}
@@ -1265,8 +1389,10 @@ function SourceFilterBar({
           </SelectContent>
         </Select>
       </div>
-      <div className="w-40 space-y-1.5">
-        <Label htmlFor="flt-verify">可用性</Label>
+      <div className="space-y-1">
+        <Label htmlFor="flt-verify" className="text-xs">
+          可用性
+        </Label>
         <Select
           value={filter.verifyStatus || "all"}
           onValueChange={(value) =>
@@ -1283,13 +1409,18 @@ function SourceFilterBar({
             <SelectItem value="untested">未验证</SelectItem>
           </SelectContent>
         </Select>
+      </div>
 
-        {/*
-          导出按当前筛选条件走：先筛「实测可用」再导出，是最常见的用法。
-          用 <a download> 而不是 fetch —— 浏览器直接存文件，不必把上百 KB
-          的 JSON 先读进内存再拼 blob。
-        */}
-        <Button variant="outline" size="sm" asChild>
+      {/*
+        导出自成一格，不再塞在「可用性」里面 —— 原先它嵌在那个 div 的
+        Select 下方，既把该列顶高，也让筛选器在窄屏下彼此挤压。
+
+        导出按当前筛选条件走：先筛「实测可用」再导出，是最常见的用法。
+        用 <a download> 而不是 fetch —— 浏览器直接存文件，不必把上百 KB
+        的 JSON 先读进内存再拼 blob。
+      */}
+      <div className="col-span-2 sm:col-span-4 lg:col-span-1 lg:justify-self-end">
+        <Button variant="outline" size="sm" className="w-full lg:w-auto" asChild>
           <a href={exportHref(filter)} download>
             <Download className="size-4" />
             导出书源
