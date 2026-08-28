@@ -206,6 +206,29 @@ describe("quickImportAndSubscribe", () => {
 
   it("书源规则不可翻译时明确拒绝，不静默失败", async () => {
     const result = await quickImportAndSubscribe(db, undefined, {
+      // 搜索、目录、正文规则全是 JS —— 一条也翻译不出来，才该拒
+      sourceJson: JSON.stringify({
+        ...bookSource,
+        ruleSearch: { bookList: "<js>result</js>" },
+        ruleToc: { chapterList: "<js>result</js>" },
+        ruleContent: { content: "<js>result.text()</js>" },
+        searchUrl: "",
+      }),
+      bookUrls: ["https://novels.example.org/book/1"],
+      actorId: userId,
+    });
+    expect(result.totals.sources).toBe(0);
+    expect(result.rejected[0]?.reason).toBeTruthy();
+  });
+
+  /**
+   * 只有正文规则是 JS 时不拒源：改用页面结构探测正文。
+   * 这类源的搜索与目录规则完好，拒掉等于白扔一个能用的源。
+   */
+  it("只有正文规则不可翻译时照常导入，正文转为探测", async () => {
+    responses.set("https://novels.example.org/book/1", tocHtml);
+    responses.set("https://novels.example.org/c/1", chapterHtml("第一章正文"));
+    const result = await quickImportAndSubscribe(db, undefined, {
       sourceJson: JSON.stringify({
         ...bookSource,
         ruleContent: { content: "<js>result.text()</js>" },
@@ -213,8 +236,15 @@ describe("quickImportAndSubscribe", () => {
       bookUrls: ["https://novels.example.org/book/1"],
       actorId: userId,
     });
-    expect(result.totals.sources).toBe(0);
-    expect(result.rejected[0]?.reason).toMatch(/正文规则无法翻译/);
+    expect(result.totals.sources).toBe(1);
+    const row = raw
+      .prepare("SELECT config FROM content_sources WHERE id = ?")
+      .get(result.sources[0]!.sourceId) as { config: string } | undefined;
+    const config = JSON.parse(row!.config) as { contentMode?: string; contentRule?: unknown };
+    expect(config.contentMode).toBe("detect");
+    expect(config.contentRule).toBeNull();
+    // 目录照常抓到
+    expect(result.sources[0]!.subscribed[0]?.chaptersAdded).toBe(2);
   });
 
   it("一批里坏的被拒、好的照常导入", async () => {

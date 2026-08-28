@@ -123,14 +123,22 @@ describe("真实清单（50 源 / 49 扁平）", () => {
     expect(result.converted.length + result.failed.length).toBe(50);
   });
 
-  it("剩下的拒绝理由都正当（真需 JS 引擎 / XPath / 确实没正文）", () => {
+  it("剩下的拒绝理由都正当（真需 JS 引擎 / XPath / 三样全空）", () => {
     for (const f of result.failed) {
-      expect(f.reason).toMatch(/JS 规则|XPath|缺少正文规则/);
+      expect(f.reason).toMatch(/JS 规则|XPath|没有可用规则/);
     }
   });
 
-  it("转出来的源带着能用的正文规则", () => {
+  /**
+   * 正文要么有可求值的规则，要么明确标成 detect（靠页面结构探测）。
+   * 不允许第三种状态：规则为空却仍标 rules，那种源读章节时才报错。
+   */
+  it("转出来的源，正文规则可用或明确标为探测", () => {
     for (const c of result.converted) {
+      if (c.config.contentMode === "detect") {
+        expect(c.config.contentRule).toBeNull();
+        continue;
+      }
       expect(c.config.contentRule).toBeTruthy();
       expect(typeof c.config.contentRule).toBe("string");
     }

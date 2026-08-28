@@ -73,7 +73,7 @@ describe("同地址书源配置升级", () => {
       .all();
     expect(rows).toHaveLength(1);
     const config = rows[0]!.config as Record<string, unknown>;
-    expect(config.converterVersion).toBe(3);
+    expect(config.converterVersion).toBe(4);
     expect(String(config.infoTocUrl)).toContain("/api/toc");
     expect(config.tocMode).toBe("rules");
     expect(rows[0]!.status).toBe("enabled");

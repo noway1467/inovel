@@ -236,20 +236,29 @@ export async function createSource(db: AppDb, input: CreateSourceInput) {
   if (input.kind === "rules") {
     const config = input.config ?? {};
     /**
-     * 目录走探测的源不带 tocList/tocName/tocUrl，这是合法状态而非残缺 ——
-     * 目录规则整段是 JS 的源就靠它才能装进来。正文规则仍是硬要求：
-     * 没有它连一章都读不出来。
+     * 走探测的那部分不带对应规则，这是合法状态而非残缺：
+     * 目录规则整段是 JS 的源靠 tocMode="detect" 装进来，正文规则整段是 JS 的
+     * 靠 contentMode="detect"。两者都要求"整组为空"，不允许留一半 ——
+     * 有 tocList 没 tocUrl 的话章节没有可访问地址。
      */
-    const required =
-      config.tocMode === "detect"
-        ? ["contentRule"]
-        : ["tocList", "tocName", "tocUrl", "contentRule"];
+    const required = [
+      ...(config.tocMode === "detect" ? [] : ["tocList", "tocName", "tocUrl"]),
+      ...(config.contentMode === "detect" ? [] : ["contentRule"]),
+    ];
     const missing = required.filter(
       (key) => typeof config[key] !== "string" || !(config[key] as string).trim()
     );
-    if (missing.length > 0) {
+    /**
+     * 目录和正文都靠探测时，至少得留下搜索规则或搜索地址 ——
+     * 三样全空的源没有任何入口，装进来只会在使用时报错。
+     */
+    const hasAnyEntry = ["searchUrl", "searchList", "tocList", "contentRule"].some(
+      (key) => typeof config[key] === "string" && (config[key] as string).trim()
+    );
+    if (missing.length > 0 || !hasAnyEntry) {
+      const detail = missing.length > 0 ? missing.join(" / ") : "搜索与目录规则";
       throw new Error(
-        `规则源需要完整规则（缺 ${missing.join(" / ")}）。请用「批量导入源」粘贴书源 JSON，不要手工登记规则源。`
+        `规则源需要完整规则（缺 ${detail}）。请用「批量导入源」粘贴书源 JSON，不要手工登记规则源。`
       );
     }
   }

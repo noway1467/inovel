@@ -77,18 +77,44 @@ describe("convertLegadoSource", () => {
     expect(result.config.tocUrl).toBe("href");
   });
 
-  it("缺正文规则时报错", () => {
-    expect(() => convertLegadoSource({ ...validSource, ruleContent: {} })).toThrow(/正文规则/);
+  /**
+   * 缺正文规则不再拒源：搜索与目录规则在，正文交给页面结构探测。
+   * 这条路是导出往返必需的 —— 探测正文的源导出时 ruleContent 本来就是空的。
+   */
+  it("缺正文规则时转为探测模式，不拒源", () => {
+    const result = convertLegadoSource({ ...validSource, ruleContent: {} });
+    expect(result.config.contentMode).toBe("detect");
+    expect(result.config.contentRule).toBeNull();
+    expect(result.config.tocMode).toBe("rules");
   });
 
-  it("正文规则无法降级时报错，不静默通过", () => {
-    // 纯 JS 且内层没有可抢救的规则 —— 没有正文就读不了任何一章，必须拒
+  it("搜索、目录、正文三样全空时拒源", () => {
     expect(() =>
       convertLegadoSource({
-        ...validSource,
-        ruleContent: { content: "<js>result.text()</js>" },
+        bookSourceName: "空壳",
+        bookSourceUrl: "https://empty.example.com",
       })
-    ).toThrow(/正文规则无法翻译/);
+    ).toThrow(/没有可用规则/);
+  });
+
+  /**
+   * 纯 JS 正文规则改走探测，不再拒源。
+   *
+   * 正文页是最好探测的一类页面（整页最大的一坨连续文字就是正文），
+   * 而这些源的搜索与目录规则往往完好 —— 因为一条正文规则就整源丢掉，
+   * 代价远大于收益。合集里这样的源有 35 个。
+   */
+  it("正文规则无法降级时转为探测模式，不拒源", () => {
+    const result = convertLegadoSource({
+      ...validSource,
+      ruleContent: { content: "<js>result.text()</js>" },
+    });
+    expect(result.config.contentMode).toBe("detect");
+    expect(result.config.contentRule).toBeNull();
+    expect(result.warnings.join()).toMatch(/探测正文/);
+    // 搜索与目录规则不受影响
+    expect(result.config.searchUrl).toBe(validSource.searchUrl);
+    expect(result.config.tocMode).toBe("rules");
   });
 
   it("目录规则需 JS 求值时转探测模式，仍可导入", () => {
@@ -185,13 +211,13 @@ describe("parseLegadoJson", () => {
   });
 
   it("一条坏规则不毁掉整批，失败原因单独返回", () => {
-    // 连正文规则都没有的源仍会被拒：那是硬门槛
+    // 搜索、目录、正文三样全空的空壳源仍会被拒：那是硬门槛
     const bad = { bookSourceName: "坏源", bookSourceUrl: "https://b.example.com" };
     const result = parseLegadoJson(JSON.stringify([validSource, bad]));
     expect(result.converted).toHaveLength(1);
     expect(result.failed).toHaveLength(1);
     expect(result.failed[0]?.name).toBe("坏源");
-    expect(result.failed[0]?.reason).toMatch(/正文规则/);
+    expect(result.failed[0]?.reason).toMatch(/没有可用规则/);
   });
 
   it("非法 JSON 与空数组报错", () => {

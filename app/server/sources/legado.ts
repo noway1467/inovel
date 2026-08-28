@@ -5,9 +5,11 @@ import { isSupportedAjaxRule } from "~/server/sources/java-ajax";
 /**
  * v3: JSON 目录数组展开、目录/正文分页兜底、POST 目录选项、
  *     扁平格式、净化规则、java.ajax 与全局 header。
+ * v4: 正文规则不可译时改走通用探测（contentMode）、清洗段里的
+ *     `{{}}`/`<js>` 不再拖垮整条规则。
  * 修改转换器能力时递增，让老配置能在重新导入时升级。
  */
-export const currentConverterVersion = 3;
+export const currentConverterVersion = 4;
 
 /**
  * 开源阅读（Legado）书源 JSON → 内部规则配置。
@@ -55,8 +57,20 @@ export interface RulesConfig {
   tocMode?: "rules" | "detect";
   /** 目录下一页地址；目录分多页时靠它翻完 */
   nextTocUrl?: string | null;
-  /** 正文规则（必需） */
-  contentRule: string;
+  /**
+   * 正文规则。contentMode === "rules" 时必需；"detect" 时为空，
+   * 由适配器的通用正文探测接手。
+   */
+  contentRule?: string | null;
+  /**
+   * 正文怎么来：按规则取，还是从页面结构探测。
+   *
+   * 与 tocMode 同理。正文规则原先是硬门槛，翻译不了就整源拒收 —— 实测
+   * 600 个真实书源里 35 个的正文规则是真 JS（AES 解密、Jsoup 调用），
+   * 而它们的搜索与目录规则大多完好。正文页是最好探测的一类页面
+   * （整页最大的一坨连续文字就是正文），没道理为此丢掉整个源。
+   */
+  contentMode?: "rules" | "detect";
   /** 正文下一页地址；长章节分多页时靠它拼完整 */
   nextContentUrl?: string | null;
   /**
@@ -453,18 +467,26 @@ export function convertLegadoSource(raw: unknown): ConversionResult {
   const rawTocUrl = clean(source.ruleToc?.chapterUrl) ?? (rawTocList ? "href" : null);
 
   /**
-   * 正文规则是硬门槛：没有它这个源连一章都读不出来，装进来毫无意义。
-   * 目录则不是 —— 页面结构能探测，见下面的 tocMode。
+   * 正文规则不可用（缺失或翻译不了）时改标 detect，由通用正文探测接手。
+   *
+   * 正文页是最好探测的一类页面：整页最大的一坨连续文字就是正文。为一条
+   * 正文规则丢掉整个源太浪费 —— 这类源的搜索与目录规则大多完好。
+   *
+   * 空壳源不是靠这一项挡的，而是靠下面的「三样全空」判断：合集里那 312 个
+   * 空壳的搜索、目录、正文规则一并是空的，没有任何入口。
    */
   const contentOutcome = resolveContentRule(clean(source.ruleContent?.content));
-  if (contentOutcome.state === "absent") {
-    throw new LegadoConversionError("缺少正文规则（ruleContent.content）");
+  const contentMode: "rules" | "detect" = contentOutcome.state === "ok" ? "rules" : "detect";
+  const contentRule = contentOutcome.state === "ok" ? contentOutcome.rule : null;
+  if (contentOutcome.state === "ok" && contentOutcome.note) {
+    warnings.push(`正文：${contentOutcome.note}`);
   }
   if (contentOutcome.state === "unusable") {
-    throw new LegadoConversionError(`正文规则无法翻译 —— ${contentOutcome.reason}`);
+    warnings.push(
+      `正文规则无法翻译（${contentOutcome.reason}），已改为从页面结构探测正文。` +
+        `搜索与目录规则不受影响。`
+    );
   }
-  const contentRule = contentOutcome.rule;
-  if (contentOutcome.note) warnings.push(`正文：${contentOutcome.note}`);
 
   /**
    * chapterUrl 有两种形态，要分开判：
@@ -523,6 +545,18 @@ export function convertLegadoSource(raw: unknown): ConversionResult {
     warnings.push("搜索地址需要 JS 求值，已禁用该源的搜索；目录与正文不受影响");
   }
 
+  /**
+   * 拒空壳源：搜索地址、目录规则、正文规则三样全无。
+   *
+   * 这是合集里 312/600 的形态 —— 导出时规则被清空，只剩个名字和网址。
+   * 装进来只会让源列表看着多、实际一个都打不开。有任意一样就留下：
+   * 目录规则在、正文靠探测能读；正文规则在、目录靠探测也能读。
+   */
+  const hasSearchRule = Boolean(searchUrlUsable || clean(source.ruleSearch?.bookList));
+  if (!hasSearchRule && !rawTocList && contentOutcome.state === "absent") {
+    throw new LegadoConversionError("书源没有可用规则（搜索、目录、正文都为空）");
+  }
+
   const config: RulesConfig = {
     searchUrl: searchUrlUsable ? rawSearchUrl : null,
     searchList: validate(clean(source.ruleSearch?.bookList), "搜索列表", warnings),
@@ -547,6 +581,7 @@ export function convertLegadoSource(raw: unknown): ConversionResult {
     tocUrl: tocMode === "rules" ? (tocOutcomes.tocUrl as { rule: string }).rule : null,
     // 分页规则可缺、可不可译：缺了只是拿不到后续页，不影响首页可用
     nextTocUrl: validate(clean(source.ruleToc?.nextTocUrl), "目录分页", warnings),
+    contentMode,
     contentRule,
     nextContentUrl: validate(clean(source.ruleContent?.nextContentUrl), "正文分页", warnings),
     /**

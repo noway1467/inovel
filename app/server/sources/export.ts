@@ -60,6 +60,7 @@ function buildComment(source: ExportableSource, config: RulesConfig): string {
   else if (source.verifyStatus === "skipped") parts.push("无法自动验证（需手工给书籍地址）");
   else if (source.verifyStatus === "failed") parts.push("验证未通过");
   if (config.tocMode === "detect") parts.push("目录靠页面结构探测，无目录规则");
+  if (config.contentMode === "detect") parts.push("正文靠页面结构探测，无正文规则");
   if (source.verifyMessage) parts.push(source.verifyMessage);
   return parts.join("；");
 }
@@ -73,7 +74,19 @@ function buildComment(source: ExportableSource, config: RulesConfig): string {
 export function toLegadoSource(source: ExportableSource): LegadoExport | null {
   if (source.kind !== "rules") return null;
   const config = source.config as RulesConfig | null;
-  if (!config || typeof config !== "object" || !config.contentRule) return null;
+  if (!config || typeof config !== "object") return null;
+  /**
+   * 有任意一样能用的东西就值得导出：搜索地址、搜索/目录规则、正文规则。
+   *
+   * 不能只看 contentRule：正文靠探测的源（contentMode === "detect"）
+   * 那一项本来就是空的，按 contentRule 过滤会把它们整条丢掉。
+   * searchUrl 也要算进来 —— 目录和正文都靠探测的源只剩这一样，
+   * 但那是它唯一的入口，丢了这个源就等于没导出。
+   */
+  const hasAnyRule = Boolean(
+    config.contentRule || config.searchList || config.tocList || config.searchUrl
+  );
+  if (!hasAnyRule) return null;
 
   const comment = buildComment(source, config);
   const out: LegadoExport = {

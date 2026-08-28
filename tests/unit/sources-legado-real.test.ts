@@ -72,7 +72,15 @@ describe.skipIf(!hasFixture)("真实书源合集转换率", () => {
    */
   it("转换成功的源，目录规则可求值或明确标为探测", () => {
     for (const item of result.converted) {
-      expect(canParseRule(item.config.contentRule)).toBe(true);
+      /**
+       * 正文与目录一样有两种合法形态：规则可求值，或整条为空并标成 detect
+       * （正文靠页面结构探测）。同样不允许"留一半"。
+       */
+      if (item.config.contentMode === "detect") {
+        expect(item.config.contentRule).toBeNull();
+      } else {
+        expect(canParseRule(item.config.contentRule!)).toBe(true);
+      }
       if (item.config.tocMode === "detect") {
         expect(item.config.tocList).toBeNull();
         expect(item.config.tocName).toBeNull();

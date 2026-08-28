@@ -39,6 +39,7 @@ import {
   detectObfuscatedChapters,
   detectTocPageUrl,
 } from "~/server/sources/toc-detect";
+import { detectContentParagraphs } from "~/server/sources/content-detect";
 import { detectJieqiArticleNo, fetchJieqiToc } from "~/server/sources/jieqi-toc";
 
 /**
@@ -212,15 +213,15 @@ function readConfig(config: Record<string, unknown>): RulesConfig {
       : null);
   const rawContent = typeof config.contentRule === "string" ? config.contentRule : null;
   const contentRule = isSupportedAjaxRule(rawContent) ? rawContent! : usableRule(config.contentRule);
-  if (!contentRule) {
-    // 正文规则没有探测兜底：没有它这个源一章都读不出来
-    const raw = typeof config.contentRule === "string" ? config.contentRule.trim() : "";
-    throw new Error(
-      raw
-        ? "正文规则需要 JS 求值且无法降级，该源读不出正文。请换用规则为 CSS 的源。"
-        : "规则配置不完整：需要 contentRule"
-    );
-  }
+  /**
+   * 正文规则不可用时改走通用探测，而不是报错。
+   *
+   * 正文页是最好探测的一类页面：整页最大的一坨连续文字就是正文。
+   * 早先这里直接抛错，于是正文规则是真 JS 的源（合集里 35 个）连订阅都做不到，
+   * 尽管它们的搜索与目录规则完好。显式标了 detect 的源同样走这条路。
+   */
+  const contentMode: "rules" | "detect" =
+    config.contentMode === "detect" || !contentRule ? "detect" : "rules";
 
   /**
    * 目录三件套缺任意一项就走探测。
@@ -237,6 +238,7 @@ function readConfig(config: Record<string, unknown>): RulesConfig {
     tocList,
     tocName,
     tocUrl,
+    contentMode,
     contentRule,
   };
 }
@@ -594,13 +596,25 @@ export const rulesAdapter: SourceAdapter = {
        * 拼起来才是完整正文；命中单个容器的规则（`id.content@html`）
        * 结果不变。
        */
-      const parsed = evalRuleAll(doc, config.contentRule).join("\n").trim();
+      const parsed =
+        config.contentMode === "detect" || !config.contentRule
+          ? ""
+          : evalRuleAll(doc, config.contentRule).join("\n").trim();
       if (parsed) {
         // 正文规则多为 @html/@content，取出来的是 HTML 片段，需再解析分段；
         // 若已是纯文本，parseHtml 也能安全处理
         const text = parsed.includes("<") ? blockTextOf(parseHtml(parsed)) : parsed;
         const nextParagraphs = toParagraphs(text);
         paragraphs.push(...(nextParagraphs.length > 0 ? nextParagraphs : toParagraphs(parsed)));
+      } else if (doc.kind === "html") {
+        /**
+         * 探测正文：detect 模式，以及规则在这一页落空的情况。
+         *
+         * 落空也兜底是有意的 —— 站点改版后老规则的选择器会一起失效，
+         * 而正文页的结构特征（最大的一坨连续文字）改版后依然成立。
+         * 分页正文里也常见某一页换了模板，只兜这一页比整章报错好。
+         */
+        paragraphs.push(...detectContentParagraphs(doc.node));
       }
 
       /**
@@ -620,7 +634,13 @@ export const rulesAdapter: SourceAdapter = {
       if (pageUrl) await delay(paginationDelayMs);
     }
 
-    if (paragraphs.length === 0) throw new Error("正文规则未命中内容");
+    if (paragraphs.length === 0) {
+      throw new Error(
+        config.contentMode === "detect"
+          ? "未能从页面结构中识别出正文"
+          : "正文规则未命中内容"
+      );
+    }
 
     /**
      * 套用书源自带的净化规则，清掉广告、"本章未完"、"一秒记住…"这类杂物。

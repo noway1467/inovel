@@ -342,7 +342,7 @@ async function evalCall(expr: Extract<Expr, { type: "call" }>, context: AjaxRule
   }
 }
 
-export function isSupportedAjaxRule(raw: unknown): boolean {
+export function isSupportedAjaxRule(raw: unknown): raw is string {
   if (typeof raw !== "string" || !raw.includes("java.ajax")) return false;
   try {
     const ast = new Parser(tokenize(scriptOf(raw))).parse();

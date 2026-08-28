@@ -160,10 +160,24 @@ function parseCleanups(raw: string): { body: string; cleanups: ParsedRule["clean
     for (let i = 0; i < segments.length; i += 2) {
       const pattern = segments[i];
       if (!pattern) continue;
+      /**
+       * 含 `{{...}}` 的清洗段直接跳过，而不是让整条规则失败。
+       *
+       * 那是 Legado 的运行期插值（`{{book.name}}`、`{{chapter.title}}`），
+       * 要等书名/章节名才有值。我们没有这个上下文，但清洗只是去广告 ——
+       * 少做一条清洗远好过整条正文规则报废。真实合集里有 7 个源就栽在这：
+       * 选择器 `#nr1@html` 完全可用，只因为清洗段里有 `{{book.author}}`
+       * 就被判"不支持 JS 规则"，整个源在导入时被拒。
+       */
+      if (pattern.includes("{{")) continue;
       try {
         cleanups.push({ pattern: new RegExp(pattern, "g"), replacement: segments[i + 1] ?? "" });
       } catch {
-        throw new UnsupportedRuleError(`正则不合法：${pattern}`);
+        /**
+         * 正则编译不过同样只跳过这一条。这些正则来自第三方书源，写错很常见，
+         * 而它跟"能不能取到正文"无关。
+         */
+        continue;
       }
     }
   }
@@ -229,20 +243,46 @@ export function parseRule(raw: string): ParsedRule {
   const input = stripListPrefix((raw ?? "").trim());
   if (!input) throw new UnsupportedRuleError("规则为空");
 
-  /**
-   * `@js:` 出现在中段也不行（`class.x@html@js:(...)` 形态很常见）。
-   * 此前只判开头，中段的 JS 会被 `@` 拆进选择器 —— 同样是静默失效。
-   * 这类规则由 legado.ts 的 degradeJsRule 在导入/读取时降级掉。
-   */
-  if (input.includes("<js>") || /@js:/i.test(input) || input.includes("{{")) {
-    throw new UnsupportedRuleError("不支持 JS 规则（<js> 或 {{}} 模板），请改用 CSS 或 JSONPath");
-  }
   if (input.startsWith("//") || input.startsWith("@xpath:") || input.startsWith("@XPath:")) {
     throw new UnsupportedRuleError("不支持 XPath 规则，请改用 CSS 规则");
   }
 
+  /**
+   * 末尾的 `<js>...</js>` 是后处理，剥掉即可。
+   *
+   * 形态是 `#content@html####（本章未完）\n<js>java.t2s(result)</js>` ——
+   * 那段 JS 干的是繁简转换、去标签这类事，我们的正文管线本来就做。
+   * 前面必须还剩内容才剥：整段就是 `<js>` 的规则没有可用的选择器，
+   * 应当照旧判不支持。
+   */
+  const jsTail = input.replace(/<js>[\s\S]*?<\/js>\s*$/i, "").trim();
+  const withoutJsTail = jsTail ? jsTail : input;
+
+  /**
+   * `<js>` / `@js:` 在整条规则里出现就判不支持，包括清洗段中。
+   *
+   * 它们是要跑代码的后处理（字体反混淆、拼分页标记），跳过会静默改变结果。
+   * 这类规则交给 legado.ts 的 degradeJsRule：它从 JS 处截断，保留前面的
+   * 选择器和清洗段，能救回来的就还能用。
+   */
+  if (withoutJsTail.includes("<js>") || /@js:/i.test(withoutJsTail)) {
+    throw new UnsupportedRuleError("不支持 JS 规则（<js> 或 @js:），请改用 CSS 或 JSONPath");
+  }
+
   // 先剥清洗段，再拆 || —— 否则 ## 里的正则可能含 |
-  const { body, cleanups } = parseCleanups(input);
+  const { body, cleanups } = parseCleanups(withoutJsTail);
+
+  /**
+   * `{{}}` 只在选择器上才是致命的。
+   *
+   * 清洗段里的 `{{book.name}}`、`{{chapter.title}}` 是"取到正文之后拿书名/章名
+   * 去掉水印行"，属于去广告，跳过不影响正文内容 —— parseCleanups 会丢掉那一段。
+   * 早先在整条规则上判，一条完好的选择器会被清洗段里的插值一起拖下水，
+   * 合集里有 6 个源就是这样被误拒的。
+   */
+  if (body.includes("{{")) {
+    throw new UnsupportedRuleError("不支持 {{}} 模板规则，请改用 CSS 或 JSONPath");
+  }
   const branches = body
     .split("||")
     .map((s) => s.trim())
