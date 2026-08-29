@@ -1,10 +1,12 @@
 import { Link } from "react-router";
-import { ArrowRight, BookMarked, Search } from "lucide-react";
+import { ArrowRight, BookMarked, Compass, Search } from "lucide-react";
 import type { Route } from "./+types/home";
 import { BookListItem } from "~/components/book/book-list-item";
 import { BookCard, type BookSummary } from "~/components/book/book-card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "~/components/ui/tabs";
 import { EmptyState } from "~/components/state/empty-state";
+import { openBookLinkProps } from "~/lib/open-book";
+import { pageMeta, siteName } from "~/lib/page-title";
 import { cloudflareContext } from "~/server/context";
 import { createDb } from "~/server/db";
 import { listPublishedBooks } from "~/server/repositories/books";
@@ -14,6 +16,11 @@ import {
 } from "~/server/operations/service";
 import { listEnabledCategories } from "~/server/repositories/categories";
 import { getRankingBooks } from "~/server/rankings/service";
+
+// 首页不叠"发现 · 悦读"，直接站名加一句介绍，收藏夹里看着才像首页
+export function meta(_: Route.MetaArgs) {
+  return pageMeta(`${siteName} · 在线阅读`, "发现好书、追更新、管理书架的在线阅读站。");
+}
 
 export async function loader({ context }: Route.LoaderArgs) {
   const { env } = context.get(cloudflareContext);
@@ -95,6 +102,17 @@ export default function Home({ loaderData }: Route.ComponentProps) {
             <Search className="size-4" />
             搜索
           </Link>
+          {/*
+            在线源的分类浏览原先只能从书架的「在线书」里绕进去，等于没人找得到。
+            放进这一行不占额外高度，跟书架/搜索同一组快捷入口。
+          */}
+          <Link
+            to="/explore"
+            className="inline-flex h-9 items-center gap-2 rounded-lg border border-border bg-background px-3 text-sm font-medium text-foreground hover:bg-muted"
+          >
+            <Compass className="size-4" />
+            分类浏览
+          </Link>
         </div>
       </div>
 
@@ -160,11 +178,20 @@ export default function Home({ loaderData }: Route.ComponentProps) {
 
         <aside className="space-y-4 lg:sticky lg:top-24">
           <section className="paper-panel rounded-xl p-3">
-            <div className="mb-2 flex items-baseline justify-between">
+            <div className="mb-2 flex items-baseline justify-between gap-2">
               <h2 className="text-base font-semibold">分类找书</h2>
-              <Link to="/categories" className="text-xs text-primary hover:underline">
-                全部
-              </Link>
+              <div className="flex shrink-0 items-baseline gap-2 text-xs">
+                <Link to="/categories" className="text-primary hover:underline">
+                  全部
+                </Link>
+                {/* 站内分类之外还有在线源的分类，找分类的人多半也想看这个 */}
+                <span className="text-border" aria-hidden>
+                  |
+                </span>
+                <Link to="/explore" className="text-primary hover:underline">
+                  在线源
+                </Link>
+              </div>
             </div>
             {/* 侧栏分类改为自适应换行的小 chip，一行能塞更多，不再固定两三列 */}
             <nav className="flex flex-wrap gap-1.5">
@@ -186,11 +213,12 @@ export default function Home({ loaderData }: Route.ComponentProps) {
                 <h2 id="rankings" className="text-base font-semibold">
                   热门榜单
                 </h2>
-                <TabsList className="h-8">
-                  <TabsTrigger value="week" className="text-xs">
+                {/* 高度交给组件按内容撑开，写死 h-8 会让标签溢出、露出列表底色 */}
+                <TabsList>
+                  <TabsTrigger value="week" className="px-2.5 py-1 text-xs">
                     周榜
                   </TabsTrigger>
-                  <TabsTrigger value="month" className="text-xs">
+                  <TabsTrigger value="month" className="px-2.5 py-1 text-xs">
                     月榜
                   </TabsTrigger>
                 </TabsList>
@@ -219,7 +247,11 @@ function RankingList({ books }: { books: BookSummary[] }) {
     <ol className="mt-2 divide-y divide-border">
       {books.slice(0, 8).map((book, index) => (
         <li key={book.id}>
-          <Link to={`/books/${book.id}`} className="group flex items-center gap-2.5 py-2">
+          <Link
+            to={`/books/${book.id}`}
+            {...openBookLinkProps}
+            className="group flex items-center gap-2.5 py-2"
+          >
             <span
               className={`w-5 shrink-0 text-center font-serif text-base font-semibold ${index < 3 ? "text-accent" : "text-muted-foreground"}`}
             >

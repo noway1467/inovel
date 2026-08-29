@@ -204,14 +204,27 @@ export function childrenNamed(node: XmlNode, name: string): XmlNode[] {
   return node.children.filter((child) => child.name.toLowerCase() === target);
 }
 
-/** 元素及其后代的全部文本，压缩空白 */
+/**
+ * 元素及其后代的全部文本，压缩空白。
+ *
+ * 空白压缩只在最外层做一次。原先每层递归都跑一遍 `replace(/\s+/g)`，
+ * 深度 d 处的文字要被重扫 d 遍 —— 章节页嵌套十几层时这是实测的热点，
+ * 也是 Worker 报 1102 的一份成因。分段先攒进数组再统一压缩，结果不变。
+ */
 export function textOf(node: XmlNode | null): string {
   if (!node) return "";
   if (node.name === textNodeName) return node.text;
+  const parts: string[] = [];
   // 按 children 顺序遍历，元素与文本混排时才不会错序
-  let out = "";
-  for (const child of node.children) out += `${textOf(child)} `;
-  return out.replace(/\s+/g, " ").trim();
+  const walk = (current: XmlNode) => {
+    for (const child of current.children) {
+      if (child.name === textNodeName) parts.push(child.text);
+      else walk(child);
+    }
+  };
+  walk(node);
+  // join 已经把每段隔开，`前<em>中</em>后` 不会粘成一个词
+  return parts.join(" ").replace(/\s+/g, " ").trim();
 }
 
 /** 保留换行的文本提取，用于正文段落切分 */

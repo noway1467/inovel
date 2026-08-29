@@ -162,3 +162,36 @@ describe("真实站点的形态", () => {
     expect(paragraphs).toHaveLength(2);
   });
 });
+
+/**
+ * 探测要给每个元素打分，打分又要知道子树的文字量、链接量和一份剔噪副本。
+ * 现算的话深度 d 处的文字被 d 个祖先各算一遍，`pruneNoise` 还每次都重拷
+ * 整棵子树 —— 实测嵌套 14 层的章节页 87ms、400 段的 236ms，而
+ * maxContentPages 是 20，一章正文就能烧掉近 2 秒 CPU，Worker 直接 1102。
+ *
+ * 预计算每节点统计之后分别是 3ms 与 20ms。阈值取得很宽（只要没退回平方就
+ * 必然通过），够挡住回退，又不会因为跑测试的机器忙而误报。
+ */
+describe("探测成本不随嵌套深度爆炸", () => {
+  function nestedContent(paragraphs: number, depth: number) {
+    const body = Array.from({ length: paragraphs }, (_, i) => `<p>${line(i + 1)}</p>`).join("");
+    let inner = `<div id="content">${body}</div>`;
+    for (let d = 0; d < depth; d += 1) {
+      inner = `<div class="wrap l${d}"><div class="inner"><section>${inner}</section></div></div>`;
+    }
+    const nav = Array.from({ length: 60 }, (_, i) => `<a href="/c/${i}.html">第${i}章</a>`).join("");
+    return `<div class="nav">${nav}</div>${inner}`;
+  }
+
+  it("嵌套 14 层、400 段的章节页在 1 秒内探完且结果正确", () => {
+    const doc = page(nestedContent(400, 14));
+    const started = Date.now();
+    const paragraphs = detectContentParagraphs(doc);
+    const elapsed = Date.now() - started;
+
+    expect(paragraphs).toHaveLength(400);
+    expect(paragraphs[0]).toBe(line(1));
+    expect(paragraphs.at(-1)).toBe(line(400));
+    expect(elapsed).toBeLessThan(1000);
+  });
+});

@@ -10,6 +10,11 @@ import { createDb } from "~/server/db";
 import { getRegistrationEnabled } from "~/server/settings/registration";
 import { translateAuthError } from "~/lib/auth-errors";
 import { safeRedirectTarget } from "~/lib/redirect";
+import { pageMeta, pageTitle } from "~/lib/page-title";
+
+export function meta() {
+  return pageMeta(pageTitle("注册"));
+}
 
 export async function loader({ request, context }: Route.LoaderArgs) {
   const { env } = context.get(cloudflareContext);

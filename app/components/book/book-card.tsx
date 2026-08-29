@@ -1,5 +1,6 @@
 import { Link } from "react-router";
 import { BookCover } from "~/components/book/book-cover";
+import { openBookLinkProps } from "~/lib/open-book";
 import { cn } from "~/lib/utils";
 
 export interface BookSummary {
@@ -52,6 +53,7 @@ export function BookCard({
   return (
     <Link
       to={`/books/${book.id}`}
+      {...openBookLinkProps}
       className={cn(
         "group flex min-w-0 flex-col gap-2 rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-ring",
         className

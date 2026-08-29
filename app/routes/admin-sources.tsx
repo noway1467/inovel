@@ -24,6 +24,11 @@ import { cloudflareContext } from "~/server/context";
 import { createAuth } from "~/server/auth";
 import { createDb } from "~/server/db";
 import { getUserRoleCodes } from "~/server/security/rbac";
+import { pageMeta, pageTitle } from "~/lib/page-title";
+
+export function meta() {
+  return pageMeta(pageTitle("在线源"));
+}
 
 interface AdapterInfo {
   kind: string;

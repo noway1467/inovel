@@ -10,6 +10,11 @@ import { createAuth } from "~/server/auth";
 import { books } from "drizzle/schema";
 import { desc, eq } from "drizzle-orm";
 import { ensureAuthorProfile } from "~/server/creator/profile";
+import { pageMeta, pageTitle } from "~/lib/page-title";
+
+export function meta() {
+  return pageMeta(pageTitle("作品管理"));
+}
 
 export async function loader({ request, context }: Route.LoaderArgs) {
   const { env } = context.get(cloudflareContext);

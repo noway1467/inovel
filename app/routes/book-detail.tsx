@@ -7,6 +7,8 @@ import { Button } from "~/components/ui/button";
 import { BookCover } from "~/components/book/book-cover";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "~/components/ui/tabs";
 import { EmptyState } from "~/components/state/empty-state";
+import { openBookLinkProps } from "~/lib/open-book";
+import { pageMeta, pageTitle } from "~/lib/page-title";
 import { cloudflareContext } from "~/server/context";
 import { createDb } from "~/server/db";
 import { createAuth } from "~/server/auth";
@@ -39,6 +41,13 @@ export async function loader({ params, request, context }: Route.LoaderArgs) {
   const related = relatedBooks.filter((item) => item.id !== book.id).slice(0, 4);
 
   return { book, volumes, related, progress, inShelf };
+}
+
+export function meta({ loaderData }: Route.MetaArgs) {
+  const book = loaderData?.book;
+  if (!book) return pageMeta(pageTitle("作品详情"));
+  // 作者名也进标题：同名小说很多，光看书名分不出是哪本
+  return pageMeta(pageTitle(book.title, book.authorName), book.description);
 }
 
 export default function BookDetailPage({ loaderData }: Route.ComponentProps) {
@@ -260,7 +269,7 @@ export default function BookDetailPage({ loaderData }: Route.ComponentProps) {
           <h2 className="mb-3 text-lg font-semibold">同类推荐</h2>
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
             {related.map((item, i) => (
-              <Link key={item.id} to={`/books/${item.id}`} className="min-w-0">
+              <Link key={item.id} to={`/books/${item.id}`} {...openBookLinkProps} className="min-w-0">
                 <BookCover
                   src={item.coverKey}
                   title={item.title}

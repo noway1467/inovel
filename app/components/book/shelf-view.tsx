@@ -3,6 +3,7 @@ import { Link } from "react-router";
 import { Globe, LayoutGrid, List, Rows3 } from "lucide-react";
 import { BookCover } from "~/components/book/book-cover";
 import { Progress } from "~/components/ui/progress";
+import { openBookLinkProps } from "~/lib/open-book";
 import { cn } from "~/lib/utils";
 
 /**
@@ -123,6 +124,7 @@ export function SourceBookCard({
   return (
     <Link
       to={entry.href}
+      {...openBookLinkProps}
       className="group flex min-w-0 flex-col gap-2 rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-ring"
     >
       <div className="relative aspect-[2/3] w-full transition-transform duration-200 group-hover:-translate-y-0.5">
@@ -158,6 +160,7 @@ export function SourceBookRow({ entry }: { entry: SourceShelfEntry }) {
   return (
     <Link
       to={entry.href}
+      {...openBookLinkProps}
       className="group flex min-w-0 items-center gap-2 rounded-lg px-2 py-2.5 outline-none transition-colors hover:bg-muted/70 focus-visible:ring-2 focus-visible:ring-ring"
     >
       <Globe className="size-3.5 shrink-0 text-muted-foreground" />
@@ -204,6 +207,7 @@ export function ShelfBookRow({
   return (
     <Link
       to={to}
+      {...openBookLinkProps}
       className="group flex min-w-0 items-center gap-3 rounded-lg px-2 py-2 outline-none transition-colors hover:bg-muted/70 focus-visible:ring-2 focus-visible:ring-ring"
     >
       <BookCover

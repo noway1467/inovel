@@ -13,6 +13,11 @@ import { createDb } from "~/server/db";
 import { createAuth } from "~/server/auth";
 import { getUserRoleCodes } from "~/server/security/rbac";
 import { listPublishedBooks } from "~/server/repositories/books";
+import { pageMeta, pageTitle } from "~/lib/page-title";
+
+export function meta() {
+  return pageMeta(pageTitle("运营配置"));
+}
 
 interface CategoryItem {
   id: string;

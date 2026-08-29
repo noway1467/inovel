@@ -29,6 +29,7 @@ import {
   type LocalProgress,
   type ReaderSettings,
 } from "~/components/reader/reader-settings";
+import { pageMeta, pageTitle } from "~/lib/page-title";
 import { cloudflareContext } from "~/server/context";
 import { createDb } from "~/server/db";
 import { createAuth } from "~/server/auth";
@@ -95,6 +96,12 @@ export async function loader({ params, request, context }: Route.LoaderArgs) {
     currentIndex: navigation.currentIndex,
     totalChapters: navigation.totalChapters,
   };
+}
+
+export function meta({ loaderData }: Route.MetaArgs) {
+  const chapter = loaderData?.chapter;
+  if (!chapter) return pageMeta(pageTitle("阅读"));
+  return pageMeta(pageTitle(chapter.title, chapter.bookTitle));
 }
 
 export default function ReaderPage({ loaderData }: Route.ComponentProps) {

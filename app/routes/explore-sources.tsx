@@ -4,12 +4,18 @@ import type { Route } from "./+types/explore-sources";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { EmptyState } from "~/components/state/empty-state";
+import { openBookLinkProps } from "~/lib/open-book";
 import { encodeSourceRef } from "~/lib/source-ref";
 import { cloudflareContext } from "~/server/context";
 import { createAuth } from "~/server/auth";
 import { createDb } from "~/server/db";
 import { browseExplore, listSourcesWithExplore } from "~/server/sources/explore-browse";
 import { loginRedirectTo } from "~/server/http/request-path";
+import { pageMeta, pageTitle } from "~/lib/page-title";
+
+export function meta() {
+  return pageMeta(pageTitle("分类浏览"));
+}
 
 /**
  * 在线源的分类浏览区。
@@ -209,6 +215,7 @@ export default function ExploreSourcesPage({ loaderData }: Route.ComponentProps)
                   to={`/source/${result.sourceId}/book?url=${encodeSourceRef(
                     book.url
                   )}&title=${encodeURIComponent(book.title)}`}
+                  {...openBookLinkProps}
                   className="flex items-center gap-3 px-3 py-2.5 hover:bg-muted"
                 >
                   <BookOpenText className="size-4 shrink-0 text-muted-foreground" />

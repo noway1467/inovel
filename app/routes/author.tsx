@@ -3,6 +3,7 @@ import type { Route } from "./+types/author";
 import { BookListItem } from "~/components/book/book-list-item";
 import type { BookSummary } from "~/components/book/book-card";
 import { EmptyState } from "~/components/state/empty-state";
+import { pageMeta, pageTitle } from "~/lib/page-title";
 import { cloudflareContext } from "~/server/context";
 import { createDb } from "~/server/db";
 import { listPublishedBooks } from "~/server/repositories/books";
@@ -21,6 +22,15 @@ export async function loader({ params, context }: Route.LoaderArgs) {
   const allBooks = await listPublishedBooks(db, 50);
   const books = allBooks.filter((book) => book.authorName === author.penName);
   return { author, books };
+}
+
+export function meta({ loaderData }: Route.MetaArgs) {
+  const author = loaderData?.author;
+  if (!author) return pageMeta(pageTitle("作者"));
+  return pageMeta(
+    pageTitle(author.penName, "作者"),
+    author.bio ?? `${author.penName}的作品列表。`
+  );
 }
 
 function toSummary(book: Awaited<ReturnType<typeof listPublishedBooks>>[number]): BookSummary {

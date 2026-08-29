@@ -1,7 +1,17 @@
 import { isRouteErrorResponse, Links, Meta, Outlet, Scripts, ScrollRestoration } from "react-router";
 import { TooltipProvider } from "~/components/ui/tooltip";
+import { pageMeta, siteName } from "~/lib/page-title";
 import type { Route } from "./+types/root";
 import "./app.css";
+
+/*
+  兜底标题。子路由自己导出 meta 时会覆盖这一份，只有两种情况会用到它：
+  路由没写 meta，或者 loader 抛错走了 ErrorBoundary（那时 loaderData 是空的）。
+  没有它浏览器会拿 URL 当标题，标签页上就是一串 /sources/xxx/chapter?key=…
+*/
+export function meta(_: Route.MetaArgs) {
+  return pageMeta(siteName);
+}
 
 /*
   首屏之前定好配色，避免闪一下白再变深色。

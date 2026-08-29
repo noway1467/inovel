@@ -44,6 +44,11 @@ import { asc, desc, eq } from "drizzle-orm";
 import { ensureAuthorProfile } from "~/server/creator/profile";
 import { listEnabledCategories } from "~/server/repositories/categories";
 import { listImportJobs, type ImportJobView } from "~/server/imports/service";
+import { pageMeta, pageTitle } from "~/lib/page-title";
+
+export function meta() {
+  return pageMeta(pageTitle("导入小说"));
+}
 
 export async function loader({ request, context }: Route.LoaderArgs) {
   const { env } = context.get(cloudflareContext);

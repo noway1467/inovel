@@ -46,6 +46,7 @@ export default [
   route("api/admin/sources/*", "routes/api.admin-sources.ts"),
   route("api/sources/search", "routes/api.sources-search.ts"),
   route("api/sources/reading", "routes/api.source-reading.ts"),
+  route("api/sources/:sourceId/toc", "routes/api.source-toc.ts"),
   route("api/creator/chapters/:chapterId/*", "routes/api.creator-chapters.ts"),
   route("api/moderation/tasks/*", "routes/api.moderation.ts"),
   route("api/moderation/books/:bookId", "routes/api.moderation.ts", { id: "api.moderation-books" }),

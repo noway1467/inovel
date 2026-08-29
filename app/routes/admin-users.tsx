@@ -10,6 +10,11 @@ import { cloudflareContext } from "~/server/context";
 import { createDb } from "~/server/db";
 import { createAuth } from "~/server/auth";
 import { getUserRoleCodes } from "~/server/security/rbac";
+import { pageMeta, pageTitle } from "~/lib/page-title";
+
+export function meta() {
+  return pageMeta(pageTitle("用户与角色"));
+}
 
 interface AdminUser {
   id: string;

@@ -14,6 +14,7 @@ import {
   SheetTrigger,
 } from "~/components/ui/sheet";
 import { EmptyState } from "~/components/state/empty-state";
+import { pageMeta, pageTitle } from "~/lib/page-title";
 import { cloudflareContext } from "~/server/context";
 import { createDb } from "~/server/db";
 import { createAuth } from "~/server/auth";
@@ -45,6 +46,12 @@ export async function loader({ request, context, params }: Route.LoaderArgs) {
     .where(eq(chapters.bookId, chapter.bookId))
     .orderBy(asc(chapters.sortOrder));
   return { user: session.user, chapter, siblingChapters };
+}
+
+export function meta({ loaderData }: Route.MetaArgs) {
+  const chapter = loaderData?.chapter;
+  if (!chapter) return pageMeta(pageTitle("章节编辑"));
+  return pageMeta(pageTitle(chapter.title, chapter.bookTitle, "编辑"));
 }
 
 const statusLabels: Record<

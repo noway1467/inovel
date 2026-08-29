@@ -29,6 +29,7 @@ import {
   systemDarkQuery,
   type ReaderSettings,
 } from "~/components/reader/reader-settings";
+import { pageMeta, pageTitle } from "~/lib/page-title";
 import { decodeSourceRef, encodeSourceRef } from "~/lib/source-ref";
 import { cloudflareContext } from "~/server/context";
 import { createAuth } from "~/server/auth";
@@ -89,11 +90,8 @@ export async function loader({ request, context, params }: Route.LoaderArgs) {
       currentIndex: number;
       totalChapters: number;
     } | null = null;
-    // 目录给阅读页内的目录抽屉用，与本地阅读器一致
-    let chapters: { key: string; title: string }[] = [];
 
     if (toc) {
-      chapters = toc.chapters;
       const at = Number.isFinite(index)
         ? index
         : toc.chapters.findIndex((item) => item.key === chapterKey);
@@ -116,7 +114,6 @@ export async function loader({ request, context, params }: Route.LoaderArgs) {
       sourceId,
       chapter,
       nav,
-      chapters,
       preferences,
       inShelf: Boolean(state?.shelved),
       // 同一章续读时恢复页码；换章就从头开始
@@ -131,7 +128,6 @@ export async function loader({ request, context, params }: Route.LoaderArgs) {
       sourceId,
       chapter: null,
       nav: null,
-      chapters: [] as { key: string; title: string }[],
       preferences: null,
       inShelf: false,
       resumePageIndex: 0,
@@ -139,19 +135,17 @@ export async function loader({ request, context, params }: Route.LoaderArgs) {
   }
 }
 
+export function meta({ loaderData }: Route.MetaArgs) {
+  const bookTitle = loaderData?.bookTitle;
+  const book = bookTitle === "未命名" ? null : bookTitle;
+  // 章节名只有目录里有（正文结果不带），目录抓不到就只剩书名
+  const chapterTitle = loaderData?.nav?.title;
+  if (!chapterTitle && !book) return pageMeta(pageTitle("在线阅读"));
+  return pageMeta(pageTitle(chapterTitle, book));
+}
+
 export default function SourceChapterPage({ loaderData }: Route.ComponentProps) {
-  const {
-    chapter,
-    nav,
-    // loader 顶部有 redirect 分支，联合类型里 chapters 可能缺；
-    // 目录定位的 hook 在提前 return 之前跑，必须有值
-    chapters = [],
-    bookTitle,
-    bookUrl,
-    sourceId,
-    error,
-    preferences,
-  } = loaderData;
+  const { chapter, nav, bookTitle, bookUrl, sourceId, error, preferences } = loaderData;
   const navigate = useNavigate();
 
   const [settings, setSettings] = useState<ReaderSettings>(defaultReaderSettings);
@@ -163,6 +157,15 @@ export default function SourceChapterPage({ loaderData }: Route.ComponentProps) 
   const [tocOpen, setTocOpen] = useState(false);
   const [tocDescending, setTocDescending] = useState(false);
   const [tocPage, setTocPage] = useState(0);
+  /**
+   * 目录按需加载：点开抽屉才取，同一本书一次会话内只取一次。
+   *
+   * 原先目录跟在 loader 返回里，翻每一页都要把整份章节表重新序列化一遍 ——
+   * 千章的书就是几百 KB 的白搭负载，Worker 直接 1102。与本地阅读器同一做法。
+   */
+  const [chapters, setChapters] = useState<{ key: string; title: string }[] | null>(null);
+  const [tocError, setTocError] = useState(false);
+  const loadedBookUrl = useRef<string | null>(null);
   const currentTocRef = useRef<HTMLAnchorElement | null>(null);
   const [inShelf, setInShelf] = useState(loaderData.inShelf);
   const [shelfPending, setShelfPending] = useState(false);
@@ -281,12 +284,38 @@ export default function SourceChapterPage({ loaderData }: Route.ComponentProps) 
    * 放在提前 return（error / !chapter）之前：hook 必须每次渲染都调用，
    * 顺序不能变。所以这里用 chapter?.chapterKey 而不是解构后的值。
    */
-  const currentTocIndex = chapters.findIndex((item) => item.key === chapter?.chapterKey);
   useEffect(() => {
-    if (!tocOpen || currentTocIndex < 0) return;
+    if (loadedBookUrl.current !== bookUrl) {
+      loadedBookUrl.current = null;
+      setChapters(null);
+    }
+    if (!tocOpen || !bookUrl || loadedBookUrl.current === bookUrl) return;
+
+    const controller = new AbortController();
+    setTocError(false);
+    void (async () => {
+      try {
+        const query = new URLSearchParams({ book: encodeSourceRef(bookUrl) });
+        const response = await fetch(`/api/sources/${sourceId}/toc?${query}`, {
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error("toc failed");
+        const data = (await response.json()) as { chapters?: { key: string; title: string }[] };
+        setChapters(data.chapters ?? []);
+        loadedBookUrl.current = bookUrl;
+      } catch (cause) {
+        if ((cause as Error)?.name !== "AbortError") setTocError(true);
+      }
+    })();
+    return () => controller.abort();
+  }, [tocOpen, bookUrl, sourceId]);
+
+  const currentTocIndex = chapters?.findIndex((item) => item.key === chapter?.chapterKey) ?? -1;
+  useEffect(() => {
+    if (!tocOpen || currentTocIndex < 0 || !chapters) return;
     const position = tocDescending ? chapters.length - 1 - currentTocIndex : currentTocIndex;
     setTocPage(Math.floor(position / tocPageSize));
-  }, [tocOpen, currentTocIndex, tocDescending, chapters.length]);
+  }, [tocOpen, currentTocIndex, tocDescending, chapters]);
 
   /** 跳到正确页之后，再把当前章滚到视野中间 */
   useEffect(() => {
@@ -356,7 +385,7 @@ export default function SourceChapterPage({ loaderData }: Route.ComponentProps) 
    * 每页 500 章：千章的书全铺在抽屉里，打开就卡一下。
    * 序号用章节真实位置，倒序只改显示顺序 —— 否则倒序时「第 1 章」指向最后一章。
    */
-  const orderedToc = chapters.map((item, index) => ({ item, index }));
+  const orderedToc = (chapters ?? []).map((item, index) => ({ item, index }));
   if (tocDescending) orderedToc.reverse();
   const tocPageCount = Math.max(1, Math.ceil(orderedToc.length / tocPageSize));
   const tocSafePage = Math.min(tocPage, tocPageCount - 1);
@@ -531,7 +560,10 @@ export default function SourceChapterPage({ loaderData }: Route.ComponentProps) 
       <Sheet open={tocOpen} onOpenChange={setTocOpen}>
         <SheetContent side="left" className="max-w-[420px]">
           <SheetHeader>
-            <SheetTitle>目录（{chapters.length} 章）</SheetTitle>
+            <SheetTitle>
+              {/* 目录还没到时用 nav 里的总章数，标题不必等一次请求 */}
+              目录（{chapters?.length ?? nav?.totalChapters ?? 0} 章）
+            </SheetTitle>
           </SheetHeader>
           <SheetBody className="p-0">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/60 px-3 py-2">
@@ -569,6 +601,25 @@ export default function SourceChapterPage({ loaderData }: Route.ComponentProps) 
               )}
             </div>
             <ScrollArea className="h-[calc(100dvh-8rem)]">
+              {tocError && (
+                <p className="px-4 py-6 text-center text-sm text-muted-foreground">
+                  目录加载失败，请重新打开。
+                </p>
+              )}
+              {!tocError && chapters === null && (
+                <div className="space-y-2 p-3">
+                  {Array.from({ length: 8 }).map((_, index) => (
+                    <div
+                      key={index}
+                      className="h-9 animate-pulse rounded-lg bg-muted/60"
+                      aria-hidden
+                    />
+                  ))}
+                </div>
+              )}
+              {!tocError && chapters !== null && chapters.length === 0 && (
+                <p className="px-4 py-6 text-center text-sm text-muted-foreground">暂无章节。</p>
+              )}
               <ul className="divide-y divide-border/60">
                 {visibleToc.map(({ item, index }) => {
                   const current = item.key === chapter.chapterKey;

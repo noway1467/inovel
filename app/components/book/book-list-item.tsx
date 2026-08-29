@@ -2,11 +2,13 @@ import { Link } from "react-router";
 import { BookCover } from "~/components/book/book-cover";
 import { statusLabel, type BookSummary } from "~/components/book/book-card";
 import { Progress } from "~/components/ui/progress";
+import { openBookLinkProps } from "~/lib/open-book";
 
 export function BookListItem({ book, seed = 0 }: { book: BookSummary; seed?: number }) {
   return (
     <Link
       to={`/books/${book.id}`}
+      {...openBookLinkProps}
       className="group flex min-w-0 gap-3 rounded-xl px-2 py-3 outline-none transition-colors hover:bg-muted/70 focus-visible:ring-2 focus-visible:ring-ring"
     >
       <BookCover

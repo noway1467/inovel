@@ -16,6 +16,7 @@ import {
 import { Textarea } from "~/components/ui/textarea";
 import { Switch } from "~/components/ui/switch";
 import { EmptyState } from "~/components/state/empty-state";
+import { pageMeta, pageTitle } from "~/lib/page-title";
 import { cloudflareContext } from "~/server/context";
 import { createDb } from "~/server/db";
 import { createAuth } from "~/server/auth";
@@ -88,6 +89,11 @@ export async function loader({ request, context, params }: Route.LoaderArgs) {
     currentTags: tagRows.map((row) => row.name),
     availableTags,
   };
+}
+
+export function meta({ loaderData }: Route.MetaArgs) {
+  const title = loaderData?.book?.title;
+  return pageMeta(pageTitle(title, "作品管理"));
 }
 
 const statusText: Record<string, string> = {

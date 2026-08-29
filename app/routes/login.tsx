@@ -18,6 +18,11 @@ import {
   remainingBlockSeconds,
   saveLoginGuard,
 } from "~/lib/login-guard";
+import { pageMeta, pageTitle } from "~/lib/page-title";
+
+export function meta() {
+  return pageMeta(pageTitle("登录"));
+}
 
 export async function loader({ request, context }: Route.LoaderArgs) {
   const { env } = context.get(cloudflareContext);

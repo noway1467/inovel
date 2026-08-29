@@ -10,6 +10,11 @@ import {
   countUncategorizedBooks,
   listEnabledCategoriesWithCounts,
 } from "~/server/repositories/categories";
+import { pageMeta, pageTitle } from "~/lib/page-title";
+
+export function meta() {
+  return pageMeta(pageTitle("全部分类"));
+}
 
 export async function loader({ context }: Route.LoaderArgs) {
   const { env } = context.get(cloudflareContext);

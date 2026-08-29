@@ -2,6 +2,7 @@ import type { Route } from "./+types/category";
 import { BookListItem } from "~/components/book/book-list-item";
 import type { BookSummary } from "~/components/book/book-card";
 import { EmptyState } from "~/components/state/empty-state";
+import { pageMeta, pageTitle } from "~/lib/page-title";
 import { cloudflareContext } from "~/server/context";
 import { createDb } from "~/server/db";
 import {
@@ -19,6 +20,21 @@ export async function loader({ params, context }: Route.LoaderArgs) {
       ? await listUncategorizedBooks(db, 50)
       : await listPublishedBooksByCategorySlug(db, slug, 50);
   return { slug, books };
+}
+
+/**
+ * 分类名不在 loader 返回里，只能从书里反推：标题和 h1 共用这个函数，
+ * 避免标签页写"玄幻"而正文写别的。
+ */
+function categoryLabel(slug: string, categoryName?: string | null): string {
+  if (slug === "uncategorized") return "未分类";
+  return categoryName ?? slug ?? "分类结果";
+}
+
+export function meta({ loaderData }: Route.MetaArgs) {
+  if (!loaderData) return pageMeta(pageTitle("分类结果"));
+  const name = categoryLabel(loaderData.slug, loaderData.books[0]?.categoryName);
+  return pageMeta(pageTitle(name, "分类"), `${name}分类下共 ${loaderData.books.length} 部作品。`);
 }
 
 function toSummary(
@@ -39,14 +55,11 @@ function toSummary(
 }
 
 export default function CategoryPage({ loaderData }: Route.ComponentProps) {
-  const name =
-    loaderData.slug === "uncategorized"
-      ? "未分类"
-      : (loaderData.books[0]?.categoryName ?? loaderData.slug);
+  const name = categoryLabel(loaderData.slug, loaderData.books[0]?.categoryName);
   return (
     <div className="space-y-4">
       <div>
-        <h1 className="text-xl font-semibold">{name ?? "分类结果"}</h1>
+        <h1 className="text-xl font-semibold">{name}</h1>
         <p className="mt-1 text-sm text-muted-foreground">共 {loaderData.books.length} 部作品</p>
       </div>
       {loaderData.books.length === 0 ? (

@@ -1,4 +1,4 @@
-import { elementChildren, textNodeName, blockTextOf, textOf, type XmlNode } from "~/server/sources/xml";
+import { elementChildren, textNodeName, blockTextOf, type XmlNode } from "~/server/sources/xml";
 import { toParagraphs } from "~/server/sources/types";
 
 /**
@@ -70,72 +70,145 @@ interface Candidate {
   paragraphs: string[];
 }
 
-/** 容器内链接文字总长，用于算链接密度 */
-function linkTextLength(node: XmlNode): number {
-  let total = 0;
-  const walk = (current: XmlNode) => {
-    for (const child of elementChildren(current)) {
-      if (child.name === "a") {
-        total += textOf(child).length;
+/**
+ * 每个节点的后代统计与剔噪副本，整棵树一次算完。
+ *
+ * 为什么必须预计算：探测要给**每个**元素打分，而打分要知道该元素子树的
+ * 文字长度、链接文字长度，还要一份剔掉噪声的副本。现算的话，深度 d 处的
+ * 文字会被 d 个祖先各算一遍，`pruneNoise` 更是每打一次分就把整棵子树重
+ * 新拷一遍 —— 成本是 O(节点数 × 文字量 × 深度)。实测嵌套 14 层的章节页
+ * 探测要 87ms，而 maxContentPages 是 20，一章正文就能烧掉近 2 秒 CPU，
+ * 这是 Worker 报 1102 的一份。目录探测（toc-detect.ts）踩过同一个坑。
+ *
+ * 自底向上一次遍历，每个节点只累加直接子节点的结果，总成本 O(节点数)。
+ */
+interface NodeStats {
+  /** 原树子树文字压缩空白后的长度（不实际拼字符串） */
+  rawText: number;
+  /** 原树子树里**后代** `<a>` 的文字总长（不含自己是 `<a>` 的情况） */
+  rawLink: number;
+  /** 剔噪副本的子树文字长度 */
+  text: number;
+  /** 剔噪副本里后代 `<a>` 的文字总长 */
+  link: number;
+  /**
+   * 剔掉噪声子节点的副本。
+   *
+   * 正文容器里常混着「上一章 | 目录 | 下一章」的链接条、推荐位、脚本。
+   * 直接取整个容器的文字会把它们当成段落。只按标签名、class/id 命名和
+   * 链接密度剔除，保守起见不动内容结构 —— 正文里的 `<p>` 不会被误删。
+   * 子树没被改动时与原节点共享子节点对象，副本总量仍是 O(节点数)。
+   */
+  pruned: XmlNode;
+}
+
+type StatsMap = Map<XmlNode, NodeStats>;
+
+/** 拼接两段压缩空白的文字：中间多一个分隔空格，与 textOf 的结果对齐 */
+function appendLength(total: number, add: number): number {
+  if (add <= 0) return total;
+  return total > 0 ? total + add + 1 : add;
+}
+
+/** 这个直接子节点是噪声吗？判据只看原树，与剔噪结果无关 */
+function isNoiseChild(child: XmlNode, childStats: NodeStats | undefined): boolean {
+  if (skipTags.has(child.name)) return true;
+  const marker = `${child.attrs.class ?? ""} ${child.attrs.id ?? ""}`.trim();
+  if (marker && noisePattern.test(marker)) return true;
+  /**
+   * 纯链接容器（`<div><a>下一章</a></div>`）不是正文。判据是"自己的文字
+   * 几乎全在链接里"，这样正文中夹的少量站内链接不受影响。
+   */
+  const own = childStats?.rawText ?? 0;
+  return own > 0 && (childStats?.rawLink ?? 0) / own > 0.8;
+}
+
+function analyze(root: XmlNode): StatsMap {
+  const stats: StatsMap = new Map();
+
+  /** 显式栈，避免深页面把递归栈打爆 */
+  const order: XmlNode[] = [];
+  const stack: XmlNode[] = [root];
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    order.push(node);
+    for (const child of node.children) {
+      if (child.name !== textNodeName) stack.push(child);
+    }
+  }
+
+  // order 是先根序，倒着走就保证子节点先算完
+  for (let i = order.length - 1; i >= 0; i -= 1) {
+    const node = order[i]!;
+    let rawText = 0;
+    let rawLink = 0;
+    let text = 0;
+    let link = 0;
+    const keep: XmlNode[] = [];
+    let changed = false;
+
+    for (const child of node.children) {
+      if (child.name === textNodeName) {
+        const trimmed = child.text.replace(/\s+/g, " ").trim();
+        rawText = appendLength(rawText, trimmed.length);
+        text = appendLength(text, trimmed.length);
+        keep.push(child);
         continue;
       }
-      walk(child);
+
+      const childStats = stats.get(child);
+      rawText = appendLength(rawText, childStats?.rawText ?? 0);
+      rawLink += child.name === "a" ? (childStats?.rawText ?? 0) : (childStats?.rawLink ?? 0);
+
+      if (isNoiseChild(child, childStats)) {
+        changed = true;
+        continue;
+      }
+      const prunedChild = childStats?.pruned ?? child;
+      if (prunedChild !== child) changed = true;
+      text = appendLength(text, childStats?.text ?? 0);
+      link += child.name === "a" ? (childStats?.text ?? 0) : (childStats?.link ?? 0);
+      keep.push(prunedChild);
     }
-  };
-  walk(node);
-  return total;
+
+    // 子树一个节点都没剔掉时直接复用原节点，副本不必翻倍
+    const pruned = changed ? { ...node, children: keep } : node;
+    stats.set(node, { rawText, rawLink, text, link, pruned });
+  }
+
+  return stats;
 }
 
 /**
- * 复制一份剔掉噪声子节点的容器。
+ * 正文至少得有这么多字，否则是简介或提示条。
  *
- * 正文容器里常混着「上一章 | 目录 | 下一章」的链接条、推荐位、脚本。
- * 直接取整个容器的文字会把它们当成段落。这里只在**直接后代**层面剔除，
- * 保守起见不递归深挖 —— 正文里的 `<p>` 不会被误删。
+ * 门槛不能定高：分页正文的最后一页常只剩一两段，定在 120 会让那一页
+ * 探不出东西，整章正文缺尾。60 字约合一个完整段落，而导航条、版权行
+ * 这类短文本在 looksLikeProse 那一步就已经滤掉了。
  */
-function pruneNoise(node: XmlNode): XmlNode {
-  const keep: XmlNode[] = [];
-  for (const child of node.children) {
-    if (child.name === textNodeName) {
-      keep.push(child);
-      continue;
-    }
-    if (skipTags.has(child.name)) continue;
-    const marker = `${child.attrs.class ?? ""} ${child.attrs.id ?? ""}`.trim();
-    if (marker && noisePattern.test(marker)) continue;
-    /**
-     * 纯链接容器（`<div><a>下一章</a></div>`）不是正文。判据是"自己的文字
-     * 几乎全在链接里"，这样正文中夹的少量站内链接不受影响。
-     */
-    const own = textOf(child).length;
-    if (own > 0 && linkTextLength(child) / own > 0.8) continue;
-    keep.push(pruneNoise(child));
-  }
-  return { ...node, children: keep };
-}
+const minContentLength = 60;
 
-function scoreContainer(node: XmlNode): Candidate | null {
+function scoreContainer(stats: StatsMap, node: XmlNode): Candidate | null {
   if (skipTags.has(node.name)) return null;
+  const own = stats.get(node);
+  if (!own) return null;
 
-  const pruned = pruneNoise(node);
+  /**
+   * 先用预计算的数字筛掉绝大多数容器，再去拼字符串。段落长度之和不可能
+   * 超过子树文字总长，所以这道门槛不会漏掉本该入选的容器。
+   */
+  if (own.text < minContentLength) return null;
+
+  const linkDensity = own.text > 0 ? own.link / own.text : 0;
+  // 链接占一半以上的容器是列表或导航，不是正文
+  if (linkDensity > 0.5) return null;
+
+  const pruned = own.pruned;
   const paragraphs = toParagraphs(blockTextOf(pruned)).filter(looksLikeProse);
   if (paragraphs.length === 0) return null;
 
   const textLength = paragraphs.reduce((sum, line) => sum + line.length, 0);
-  /**
-   * 正文至少得有这么多字，否则是简介或提示条。
-   *
-   * 门槛不能定高：分页正文的最后一页常只剩一两段，定在 120 会让那一页
-   * 探不出东西，整章正文缺尾。60 字约合一个完整段落，而导航条、版权行
-   * 这类短文本在 looksLikeProse 那一步就已经滤掉了。
-   */
-  if (textLength < 60) return null;
-
-  const linkLength = linkTextLength(pruned);
-  const allText = textOf(pruned).length;
-  const linkDensity = allText > 0 ? linkLength / allText : 0;
-  // 链接占一半以上的容器是列表或导航，不是正文
-  if (linkDensity > 0.5) return null;
+  if (textLength < minContentLength) return null;
 
   let score = textLength * (1 - linkDensity);
 
@@ -160,12 +233,13 @@ function scoreContainer(node: XmlNode): Candidate | null {
  * @returns 段落数组；认不出正文时返回空数组
  */
 export function detectContentParagraphs(root: XmlNode): string[] {
+  const stats = analyze(root);
   const candidates: Candidate[] = [];
 
   const walk = (node: XmlNode) => {
     for (const child of elementChildren(node)) {
       if (skipTags.has(child.name)) continue;
-      const scored = scoreContainer(child);
+      const scored = scoreContainer(stats, child);
       if (scored) candidates.push(scored);
       walk(child);
     }

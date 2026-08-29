@@ -8,6 +8,11 @@ import { createDb } from "~/server/db";
 import { createAuth } from "~/server/auth";
 import { notifications } from "drizzle/schema";
 import { desc, eq } from "drizzle-orm";
+import { pageMeta, pageTitle } from "~/lib/page-title";
+
+export function meta() {
+  return pageMeta(pageTitle("通知中心"));
+}
 
 export async function loader({ request, context }: Route.LoaderArgs) {
   const { env } = context.get(cloudflareContext);

@@ -3,6 +3,7 @@ import type { Route } from "./+types/rankings";
 import { BookListItem } from "~/components/book/book-list-item";
 import type { BookSummary } from "~/components/book/book-card";
 import { EmptyState } from "~/components/state/empty-state";
+import { pageMeta, pageTitle } from "~/lib/page-title";
 import { cloudflareContext } from "~/server/context";
 import { createDb } from "~/server/db";
 import { getRankingBooks, type RankingType } from "~/server/rankings/service";
@@ -36,6 +37,11 @@ const tabs = [
   { key: "total", label: "总榜" },
 ];
 
+export function meta({ loaderData }: Route.MetaArgs) {
+  const label = tabs.find((tab) => tab.key === loaderData?.type)?.label;
+  return pageMeta(pageTitle(label, "作品榜单"), "按阅读量统计的热门作品排行。");
+}
+
 export default function RankingsPage({ loaderData }: Route.ComponentProps) {
   const sorted = [...loaderData.entries];
   return (
@@ -44,15 +50,20 @@ export default function RankingsPage({ loaderData }: Route.ComponentProps) {
         <h1 className="text-xl font-semibold">作品榜单</h1>
         <p className="mt-1 text-sm text-muted-foreground">统计口径以平台公示为准。</p>
       </div>
-      <div className="flex gap-2">
+      {/*
+        榜单换页要换 URL，所以这里是链接而不是 Tabs；外观刻意跟 ui/tabs
+        对齐（同一个底槽 + 主题色选中态），两处的分段控件不该长得不一样。
+      */}
+      <div className="inline-flex items-stretch gap-1 rounded-lg bg-muted p-1">
         {tabs.map((tab) => (
           <Link
             key={tab.key}
             to={`/rankings/${tab.key}`}
-            className={`rounded-md px-4 py-2 text-sm font-medium transition-colors ${
+            aria-current={loaderData.type === tab.key ? "page" : undefined}
+            className={`inline-flex items-center justify-center rounded-md px-4 py-1.5 text-sm font-medium transition-colors ${
               loaderData.type === tab.key
-                ? "bg-primary text-primary-foreground"
-                : "bg-muted text-muted-foreground hover:text-foreground"
+                ? "bg-primary text-primary-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground"
             }`}
           >
             {tab.label}

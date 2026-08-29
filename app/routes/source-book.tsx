@@ -12,6 +12,7 @@ import type { Route } from "./+types/source-book";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { EmptyState } from "~/components/state/empty-state";
+import { pageMeta, pageTitle } from "~/lib/page-title";
 import { decodeSourceRef, encodeSourceRef } from "~/lib/source-ref";
 import { cloudflareContext } from "~/server/context";
 import { createAuth } from "~/server/auth";
@@ -86,6 +87,12 @@ export async function loader({ request, context, params }: Route.LoaderArgs) {
       lastRead: null,
     };
   }
+}
+
+export function meta({ loaderData }: Route.MetaArgs) {
+  // title 是列表页带过来的书名；缺参数时 loader 已兜底成"未命名"
+  const title = loaderData?.title;
+  return pageMeta(pageTitle(title === "未命名" ? null : title, "目录"));
 }
 
 export default function SourceBookPage({ loaderData }: Route.ComponentProps) {

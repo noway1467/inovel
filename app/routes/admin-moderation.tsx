@@ -13,6 +13,11 @@ import { createAuth } from "~/server/auth";
 import { getUserRoleCodes } from "~/server/security/rbac";
 import { listPendingReviewBookGroups } from "~/server/creator/service";
 import { cn } from "~/lib/utils";
+import { pageMeta, pageTitle } from "~/lib/page-title";
+
+export function meta() {
+  return pageMeta(pageTitle("内容审核"));
+}
 
 interface TaskSummary {
   id: string;

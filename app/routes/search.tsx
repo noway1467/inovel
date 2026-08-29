@@ -10,12 +10,18 @@ import { Input } from "~/components/ui/input";
 import { EmptyState } from "~/components/state/empty-state";
 import { eq, sql } from "drizzle-orm";
 import { cn } from "~/lib/utils";
+import { openBookLinkProps } from "~/lib/open-book";
 import { encodeSourceRef } from "~/lib/source-ref";
 import { bestPreciseSourceCount, groupKey } from "~/lib/book-match";
 import { contentSources } from "drizzle/schema";
 import { cloudflareContext } from "~/server/context";
 import { createDb } from "~/server/db";
 import { searchBooks } from "~/server/repositories/books";
+import { pageMeta, pageTitle } from "~/lib/page-title";
+
+export function meta() {
+  return pageMeta(pageTitle("搜索"));
+}
 
 const hotWords = ["星海拾荒者", "盛唐小吏", "剑出昆仑", "系统", "重生", "都市"];
 
@@ -529,14 +535,12 @@ function SourceResults({ query, sourceCount }: { query: string; sourceCount: num
                     className="h-6 px-2 text-xs"
                     asChild
                   >
-                    {/* 新标签页打开：搜索结果通常要挨个试几个源，
-                        原地跳转会丢掉这一页的搜索结果 */}
+                    {/* 搜索结果通常要挨个试几个源，原地跳转会丢掉这一页 */}
                     <a
                       href={`/source/${option.sourceId}/book?url=${encodeSourceRef(
                         option.externalId
                       )}&title=${encodeURIComponent(book.title)}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
+                      {...openBookLinkProps}
                     >
                       {option.sourceName}
                     </a>

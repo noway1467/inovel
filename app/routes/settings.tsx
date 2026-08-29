@@ -11,6 +11,11 @@ import { cloudflareContext } from "~/server/context";
 import { createDb } from "~/server/db";
 import { createAuth } from "~/server/auth";
 import { getPreferences } from "~/server/services/reader";
+import { pageMeta, pageTitle } from "~/lib/page-title";
+
+export function meta() {
+  return pageMeta(pageTitle("个人设置"));
+}
 
 const themeLabels: Record<string, string> = {
   paper: "明亮纸张",

@@ -12,6 +12,11 @@ import { createAuth } from "~/server/auth";
 import { getRegistrationEnabled } from "~/server/settings/registration";
 import { getMaxUploadMb } from "~/server/settings/import-limits";
 import { getUserRoleCodes } from "~/server/security/rbac";
+import { pageMeta, pageTitle } from "~/lib/page-title";
+
+export function meta() {
+  return pageMeta(pageTitle("站点设置"));
+}
 
 export async function loader({ request, context }: Route.LoaderArgs) {
   const { env } = context.get(cloudflareContext);

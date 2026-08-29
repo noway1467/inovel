@@ -18,6 +18,11 @@ import { listRecentSourceBooks } from "~/server/services/source-reading";
 import { encodeSourceRef } from "~/lib/source-ref";
 import { readingHistory } from "drizzle/schema";
 import { desc, eq } from "drizzle-orm";
+import { pageMeta, pageTitle } from "~/lib/page-title";
+
+export function meta() {
+  return pageMeta(pageTitle("阅读历史"));
+}
 
 export async function loader({ request, context }: Route.LoaderArgs) {
   const { env } = context.get(cloudflareContext);
@@ -153,12 +158,12 @@ export default function HistoryPage({ loaderData }: Route.ComponentProps) {
     <Tabs value={tab} onValueChange={setTab}>
       {/* 与书架同一条工具行：分栏 + 计数在左，去书架的入口在右 */}
       <div className="mb-3 flex flex-wrap items-center gap-2">
-        <TabsList className="h-9">
-          <TabsTrigger value="local" className="min-h-8 px-3">
+        <TabsList>
+          <TabsTrigger value="local">
             站内书
             <span className="ml-1.5 text-xs opacity-60">{loaderData.history.length}</span>
           </TabsTrigger>
-          <TabsTrigger value="source" className="min-h-8 px-3">
+          <TabsTrigger value="source">
             在线书
             <span className="ml-1.5 text-xs opacity-60">{sourceEntries.length}</span>
           </TabsTrigger>

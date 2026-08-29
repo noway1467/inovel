@@ -60,9 +60,12 @@ test("作品详情到阅读器主链路可用，无横向溢出", async ({ page 
   expect(preferencesResponse.ok()).toBeTruthy();
   await page.goto("/");
   const firstBook = page.locator('a[href^="/books/"]').first();
-  await firstBook.click();
-  await page.waitForLoadState("networkidle");
-  const detailPage = page;
+  // 列表页进书是新标签页打开（浏览位置不丢），所以要接住弹出的那一页
+  const [detailPage] = await Promise.all([
+    page.context().waitForEvent("page"),
+    firstBook.click(),
+  ]);
+  await detailPage.waitForLoadState("networkidle");
 
   const readLink = detailPage.locator('a[href^="/read/"]').first();
   await expect(readLink).toBeVisible();
