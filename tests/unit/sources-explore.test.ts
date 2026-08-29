@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildExploreUrl,
   categoryNeedsJs,
+  findCategory,
   parseExploreCategories,
   usableCategories,
 } from "~/server/sources/explore";
@@ -21,18 +22,18 @@ describe("parseExploreCategories", () => {
       { title: "玄幻奇幻", url: "/nav/xh-qh-{{page}}.html", style: { layout_flexGrow: 1 } },
       { title: "科幻游戏", url: "/nav/kh-yx-{{page}}.html" },
     ]);
-    expect(parseExploreCategories(raw)).toEqual([
-      { title: "玄幻奇幻", urlTemplate: "/nav/xh-qh-{{page}}.html" },
-      { title: "科幻游戏", urlTemplate: "/nav/kh-yx-{{page}}.html" },
+    expect(parseExploreCategories(raw)).toMatchObject([
+      { title: "玄幻奇幻", urlTemplate: "/nav/xh-qh-{{page}}.html", group: "" },
+      { title: "科幻游戏", urlTemplate: "/nav/kh-yx-{{page}}.html", group: "" },
     ]);
   });
 
   it("认 `名称:: 地址` 换行格式", () => {
     // 全本同人的真实写法
     const raw = "火影:: /tag/{{page-1}}_huoying\n系统:: /tag/{{page-1}}_xitong";
-    expect(parseExploreCategories(raw)).toEqual([
-      { title: "火影", urlTemplate: "/tag/{{page-1}}_huoying" },
-      { title: "系统", urlTemplate: "/tag/{{page-1}}_xitong" },
+    expect(parseExploreCategories(raw)).toMatchObject([
+      { title: "火影", urlTemplate: "/tag/{{page-1}}_huoying", group: "" },
+      { title: "系统", urlTemplate: "/tag/{{page-1}}_xitong", group: "" },
     ]);
   });
 
@@ -50,6 +51,93 @@ describe("parseExploreCategories", () => {
     expect(parseExploreCategories(JSON.stringify([{ title: "有名无址" }]))).toEqual([]);
     expect(parseExploreCategories(JSON.stringify([{ url: "/有址无名" }]))).toEqual([]);
     expect(parseExploreCategories(":: /空标题")).toEqual([]);
+  });
+});
+
+/**
+ * 分组。这是「标签看起来重复」的根源：
+ * 海棠书屋的「🌹排行🌹」和「🌹分类🌹」两组下挂着同样的 24 个名字，
+ * 地址完全不同。丢掉小标题平铺出来，就是 48 个标签、每个名字出现两次。
+ */
+describe("分组小标题", () => {
+  it("JSON 里 flexBasisPercent>=1 的行是小标题，给后面的分类当分组", () => {
+    // 海棠书屋的真实结构
+    const raw = JSON.stringify([
+      { title: "🌹排行🌹", url: "", style: { layout_flexGrow: 1, layout_flexBasisPercent: 1 } },
+      { title: "言情", url: "/top/yq-{{page}}.html", style: { layout_flexBasisPercent: 0.25 } },
+      { title: "🌹分类🌹", url: "", style: { layout_flexGrow: 1, layout_flexBasisPercent: 1 } },
+      { title: "言情", url: "/list/yq-{{page}}.html", style: { layout_flexBasisPercent: 0.25 } },
+    ]);
+    const parsed = parseExploreCategories(raw);
+    expect(parsed).toMatchObject([
+      { title: "言情", group: "🌹排行🌹", urlTemplate: "/top/yq-{{page}}.html" },
+      { title: "言情", group: "🌹分类🌹", urlTemplate: "/list/yq-{{page}}.html" },
+    ]);
+    // 同名但分属两组，id 必须不同 —— 否则点第二个还是打开第一个
+    expect(parsed[0]!.id).not.toBe(parsed[1]!.id);
+  });
+
+  it("`标题::` 后面为空也是小标题", () => {
+    // 鬼故事集的真实写法：标题两侧填了大量空格，`::` 在但地址为空
+    const raw = "        最新        ::\n恐怖:: /kb/{{page}}.html\n悬疑:: /xy/{{page}}.html";
+    expect(parseExploreCategories(raw)).toMatchObject([
+      { title: "恐怖", group: "最新" },
+      { title: "悬疑", group: "最新" },
+    ]);
+  });
+
+  it("小标题自身带地址时，它既是分组名也是一个分类", () => {
+    // 700txt 的真实写法：`分类•全部` 既是小标题又指向 /fenlei/
+    const raw = JSON.stringify([
+      { title: "分类•全部", url: "/fenlei/{{page}}", style: { layout_flexBasisPercent: 1 } },
+      { title: "玄幻", url: "/fenlei/1/{{page}}", style: { layout_flexBasisPercent: 0.25 } },
+    ]);
+    expect(parseExploreCategories(raw)).toMatchObject([
+      { title: "分类•全部", group: "分类•全部", urlTemplate: "/fenlei/{{page}}" },
+      { title: "玄幻", group: "分类•全部", urlTemplate: "/fenlei/1/{{page}}" },
+    ]);
+  });
+
+  it("同组同名同址是真冗余，去掉重复的", () => {
+    const raw = "玄幻:: /x/{{page}}\n玄幻:: /x/{{page}}";
+    expect(parseExploreCategories(raw)).toHaveLength(1);
+  });
+
+  it("同名但地址不同的加序号，不能删 —— 那是两个真分类", () => {
+    // 精武小说的真实写法：玄幻小说既在 /fenlei/1/ 又在 /fenlei/18/
+    const raw = "玄幻小说:: /fenlei/1/{{page}}/\n玄幻小说:: /fenlei/18/{{page}}/";
+    const parsed = parseExploreCategories(raw);
+    expect(parsed.map((item) => item.title)).toEqual(["玄幻小说", "玄幻小说 2"]);
+    expect(parsed[0]!.id).not.toBe(parsed[1]!.id);
+  });
+
+  it("id 只跟内容有关，与顺序无关 —— 书源更新后收藏的链接仍然指向同一个分类", () => {
+    const first = parseExploreCategories("甲:: /a/{{page}}\n乙:: /b/{{page}}");
+    // 源里新插了一个分类，乙的位置后移
+    const second = parseExploreCategories("甲:: /a/{{page}}\n丙:: /c/{{page}}\n乙:: /b/{{page}}");
+    const yiBefore = first.find((item) => item.title === "乙")!;
+    const yiAfter = second.find((item) => item.title === "乙")!;
+    expect(yiAfter.id).toBe(yiBefore.id);
+  });
+});
+
+describe("findCategory", () => {
+  const categories = parseExploreCategories("甲:: /a/{{page}}\n乙:: /b/{{page}}");
+
+  it("按 id 找", () => {
+    expect(findCategory(categories, categories[1]!.id)?.title).toBe("乙");
+  });
+
+  it("按标题找 —— 兼容改版前发出去的链接", () => {
+    expect(findCategory(categories, "乙")?.title).toBe("乙");
+  });
+
+  it("没给引用时取第一个", () => {
+    expect(findCategory(categories, null)?.title).toBe("甲");
+  });
+
+  it("找不到就返回 undefined，由调用方报错", () => {
+    expect(findCategory(categories, "不存在的分类")).toBeUndefined();
   });
 });
 
@@ -126,5 +214,44 @@ describe("真实清单里的分类", () => {
         expect(built).not.toMatch(/\{\{/);
       }
     }
+  });
+
+  it("每个源内部 id 唯一，同组内不出现重名标签", () => {
+    for (const source of sources) {
+      const categories = usableCategories(source.ruleFindUrl);
+      if (categories.length === 0) continue;
+
+      const ids = new Set(categories.map((item) => item.id));
+      expect(ids.size).toBe(categories.length);
+
+      // 界面按 (分组, 标题) 显示，这一对重复用户就分不清点哪个
+      const labels = categories.map((item) => `${item.group} ${item.title}`);
+      expect(new Set(labels).size).toBe(labels.length);
+    }
+  });
+});
+
+/**
+ * 编号必须在滤掉要 JS 的分类之后算。
+ *
+ * 否则界面上会出现「悬疑 2」却找不到「悬疑」—— 前一个被 JS 过滤挡掉了，
+ * 用户只看到一个带 2 的孤零零标签。
+ */
+describe("usableCategories 与编号的配合", () => {
+  it("被 JS 过滤掉的分类不占号", () => {
+    const raw = [
+      "悬疑:: /x/index{{page - 1 == 0 ? '': '_'+page}}.html", // 要 JS，滤掉
+      "悬疑:: /x/{{page}}.html",
+    ].join("\n");
+    expect(usableCategories(raw)).toMatchObject([{ title: "悬疑" }]);
+  });
+
+  it("小标题的地址要 JS 时，它仍然给后面的分类当分组名", () => {
+    // 小标题自身指向一个要 JS 的地址：它不该成为可点分类，但分组名要留下
+    const raw = JSON.stringify([
+      { title: "热榜", url: "@js:foo()", style: { layout_flexBasisPercent: 1 } },
+      { title: "玄幻", url: "/x/{{page}}.html", style: { layout_flexBasisPercent: 0.25 } },
+    ]);
+    expect(usableCategories(raw)).toMatchObject([{ title: "玄幻", group: "热榜" }]);
   });
 });

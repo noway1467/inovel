@@ -39,6 +39,8 @@ export async function loader({ request, context, params }: Route.LoaderArgs) {
   const bookUrl = decodeSourceRef(url.searchParams.get("url") ?? "");
   const title = url.searchParams.get("title")?.trim() ?? "未命名";
   const sourceId = params.sourceId ?? "";
+  // 「刷新目录」按钮带上它，跳过 30 分钟缓存重抓
+  const refresh = url.searchParams.get("refresh") === "1";
   if (!bookUrl) {
     return {
       error: "缺少书籍地址",
@@ -55,7 +57,7 @@ export async function loader({ request, context, params }: Route.LoaderArgs) {
   try {
     // 书架状态与上次读到哪一起取，用于「继续阅读」
     const [toc, state] = await Promise.all([
-      getLiveToc(db, env.R2_CONTENT, sourceId, bookUrl),
+      getLiveToc(db, env.R2_CONTENT, sourceId, bookUrl, refresh),
       getSourceReadingState(db, session.user.id, sourceId, bookUrl).catch(() => null),
     ]);
     return {
@@ -213,8 +215,12 @@ export default function SourceBookPage({ loaderData }: Route.ComponentProps) {
             </a>
           </Button>
           <Button size="sm" variant="secondary" asChild>
-            {/* 目录有缓存，加 refresh 参数绕过 */}
-            <a href={`?url=${encodeSourceRef(bookUrl)}&title=${encodeURIComponent(title)}`}>
+            {/* 目录缓存 30 分钟，refresh=1 跳过缓存重抓 */}
+            <a
+              href={`?url=${encodeSourceRef(bookUrl)}&title=${encodeURIComponent(
+                title
+              )}&refresh=1`}
+            >
               <RefreshCw className="size-4" />
               刷新目录
             </a>

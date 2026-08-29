@@ -585,14 +585,74 @@ function directText(node: XmlNode): string {
   return out.replace(/\s+/g, " ").trim();
 }
 
-/** 后代里有几个 <a> */
-function countLinks(node: XmlNode): number {
-  let total = 0;
-  for (const child of elementChildren(node)) {
-    if (child.name === "a") total += 1;
-    total += countLinks(child);
+/**
+ * 每个节点的后代统计，整棵树一次算完。
+ *
+ * 为什么必须预计算：探测要给**每个**元素打分，而打分要知道该元素子树的
+ * 文字长度和链接数。递归现算的话，深度 d 处的文字会被它的 d 个祖先各算
+ * 一遍，还各做一次 `replace(/\s+/g)` —— 成本是 O(文字量 × 深度²)。
+ * 实测嵌套 8 层、1900 章的目录页，探测要 3476ms；而 maxTocPages 是 30，
+ * 一本书的冷启动就能烧掉几十秒 CPU，正是 Worker 报 1102 的直接原因。
+ *
+ * 自底向上一次遍历，每个节点只累加直接子节点的结果，总成本 O(节点数)。
+ */
+interface NodeStats {
+  /** 子树文字压缩空白后的长度（不实际拼字符串） */
+  textLength: number;
+  /** 子树里 <a> 的个数 */
+  linkCount: number;
+}
+
+type StatsMap = Map<XmlNode, NodeStats>;
+
+function buildStats(root: XmlNode): StatsMap {
+  const stats: StatsMap = new Map();
+
+  /** 显式栈，避免深页面把递归栈打爆 */
+  const order: XmlNode[] = [];
+  const stack: XmlNode[] = [root];
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    order.push(node);
+    for (const child of node.children) {
+      if (child.name !== textNodeName) stack.push(child);
+    }
   }
-  return total;
+
+  // order 是先根序，倒着走就保证子节点先算完
+  for (let i = order.length - 1; i >= 0; i -= 1) {
+    const node = order[i]!;
+    let textLength = 0;
+    let linkCount = node.name === "a" ? 1 : 0;
+
+    for (const child of node.children) {
+      if (child.name === textNodeName) {
+        const trimmed = child.text.replace(/\s+/g, " ").trim();
+        if (trimmed) textLength += trimmed.length + (textLength > 0 ? 1 : 0);
+        continue;
+      }
+      const childStats = stats.get(child);
+      if (!childStats) continue;
+      if (childStats.textLength > 0) {
+        textLength += childStats.textLength + (textLength > 0 ? 1 : 0);
+      }
+      linkCount += childStats.linkCount;
+    }
+
+    stats.set(node, { textLength, linkCount });
+  }
+
+  return stats;
+}
+
+function textLengthOf(stats: StatsMap, node: XmlNode): number {
+  return stats.get(node)?.textLength ?? 0;
+}
+
+/** 后代里有几个 <a>（不含自己） */
+function countLinks(stats: StatsMap, node: XmlNode): number {
+  const own = stats.get(node)?.linkCount ?? 0;
+  return node.name === "a" ? own - 1 : own;
 }
 
 /**
@@ -604,7 +664,10 @@ function countLinks(node: XmlNode): number {
  * 不分区就会把倒序那 9 条混进目录 —— 它们与正文目录重复，排序后还会插到
  * 第 5~15 章之间，同一章出现两次。
  */
-function collectLinks(container: XmlNode): { title: string; href: string; skip: boolean }[] {
+function collectLinks(
+  container: XmlNode,
+  stats: StatsMap
+): { title: string; href: string; skip: boolean }[] {
   const links: { title: string; href: string; skip: boolean }[] = [];
   let inLatest = false;
 
@@ -629,9 +692,15 @@ function collectLinks(container: XmlNode): { title: string; href: string; skip: 
        * 小标题的判据是「自己不含任何链接、文字很短」，而不是标签名。
        * 各站写法差得很远：`<h1>`、`<dt>`、`<div class="top_t">`、`<span>` 都见过，
        * 按标签名认必然漏。含链接的节点不算标题 —— 那是列表项本身。
+       *
+       * 先查预计算的长度与链接数，只有真短且无链接时才去拼字符串 ——
+       * 整棵树的绝大多数节点都在这一步被挡掉。
        */
-      const text = textOf(child).trim();
-      if (text && text.length <= 50 && !hasLink(child)) {
+      const childStats = stats.get(child);
+      const shortEnough = (childStats?.textLength ?? 0) <= 50;
+      const linkFree = (childStats?.linkCount ?? 0) === 0;
+      const text = shortEnough && linkFree ? textOf(child).trim() : "";
+      if (text) {
         if (matchesSection(text, latestSectionTexts)) {
           inLatest = true;
           continue;
@@ -654,13 +723,15 @@ function collectLinks(container: XmlNode): { title: string; href: string; skip: 
        * 只认「自身直接文字命中且**只有一个**链接」，并且只跳过这一个节点、
        * 不切换 inLatest —— 信息栏是零散一行，不是一段区块。
        */
-      const own = directText(child);
-      if (own && own.length <= 20 && matchesSection(own, latestSectionTexts) && countLinks(child) === 1) {
-        const wasInLatest = inLatest;
-        inLatest = true;
-        walk(child);
-        inLatest = wasInLatest;
-        continue;
+      if (countLinks(stats, child) === 1) {
+        const own = directText(child);
+        if (own && own.length <= 20 && matchesSection(own, latestSectionTexts)) {
+          const wasInLatest = inLatest;
+          inLatest = true;
+          walk(child);
+          inLatest = wasInLatest;
+          continue;
+        }
       }
 
       walk(child);
@@ -678,23 +749,20 @@ function collectLinks(container: XmlNode): { title: string; href: string; skip: 
   return links.map((link) => ({ ...link, skip: false }));
 }
 
-/** 节点或其后代里是否有 <a>。用来区分「小标题」与「列表项」。 */
-function hasLink(node: XmlNode): boolean {
-  for (const child of elementChildren(node)) {
-    if (child.name === "a") return true;
-    if (hasLink(child)) return true;
-  }
-  return false;
-}
-
 /**
  * 给容器打分。
  *
  * 分数 = 命中章节名模式的链接数 * 2 + 疑似章节链接数
  * 同时要求链接密度足够高（目录容器里几乎全是链接，导航栏则夹杂大量文字）。
  */
-function scoreContainer(container: XmlNode): Candidate | null {
-  const links = collectLinks(container).filter((link) => looksLikeChapterUrl(link.href));
+function scoreContainer(container: XmlNode, stats: StatsMap): Candidate | null {
+  /**
+   * 先按预计算的链接数挡一道：整棵树里绝大多数元素连 5 个链接都没有，
+   * 挡掉它们就不必进 collectLinks 走子树。
+   */
+  if ((stats.get(container)?.linkCount ?? 0) < 5) return null;
+
+  const links = collectLinks(container, stats).filter((link) => looksLikeChapterUrl(link.href));
   // 少于这么多链接不像目录
   if (links.length < 5) return null;
 
@@ -708,7 +776,7 @@ function scoreContainer(container: XmlNode): Candidate | null {
   if (score <= 0) return null;
 
   // 链接密度：容器纯文本里，链接文字应占大头
-  const allText = textOf(container).length;
+  const allText = textLengthOf(stats, container);
   const linkText = links.reduce((sum, link) => sum + link.title.length, 0);
   const density = allText > 0 ? linkText / allText : 0;
   if (density < 0.4) score = Math.floor(score * 0.3);
@@ -727,11 +795,12 @@ function scoreContainer(container: XmlNode): Candidate | null {
  */
 export function detectChapterList(root: XmlNode, pageUrl: string): DetectedChapter[] {
   const candidates: Candidate[] = [];
+  const stats = buildStats(root);
 
   const walk = (node: XmlNode) => {
     for (const child of elementChildren(node)) {
       if (child.name !== textNodeName) {
-        const scored = scoreContainer(child);
+        const scored = scoreContainer(child, stats);
         if (scored) candidates.push(scored);
       }
       walk(child);

@@ -278,3 +278,49 @@ describe("detectTocPageUrl", () => {
     expect(detectTocPageUrl(parseHtml(html), base)).toBeNull();
   });
 });
+
+/**
+ * 探测成本必须与「文字量 × 深度」成正比，不能与深度成平方。
+ *
+ * 起因是线上报 1102（Worker 超出 CPU 限额）：探测要给每个元素打分，而打分
+ * 要知道该元素子树的文字长度和链接数。递归现算的话，深度 d 处的文字会被
+ * 它的 d 个祖先各算一遍，还各做一次空白压缩。实测嵌套 8 层、1900 章的
+ * 目录页要 3476ms，而 maxTocPages 是 30 —— 一本书冷启动就能烧掉几十秒 CPU。
+ *
+ * 预计算每个节点的统计之后同一页 273ms。这里的阈值取得很宽（只要没退回
+ * 平方就必然通过），够挡住回退，又不会因为跑测试的机器忙而误报。
+ */
+describe("探测成本不随嵌套深度爆炸", () => {
+  function nestedToc(chapters: number, depth: number) {
+    const items = Array.from(
+      { length: chapters },
+      (_, i) =>
+        `<li><span class="num">${i + 1}</span><a href="/read/9/p${i + 1}.html">第${
+          i + 1
+        }章 这是一个中等长度的章节标题</a></li>`
+    ).join("");
+    let inner = `<div class="listmain"><ul>${items}</ul></div>`;
+    for (let d = 0; d < depth; d += 1) {
+      inner = `<div class="wrap l${d}"><div class="inner"><section>${inner}</section></div></div>`;
+    }
+    return `<html><body><div class="nav"><a href="/">首页</a></div>${inner}</body></html>`;
+  }
+
+  it("嵌套 8 层、1900 章的目录页在 1.5 秒内探完且结果正确", () => {
+    const doc = parseHtml(nestedToc(1900, 8));
+    const started = Date.now();
+    const chapters = detectChapterList(doc, "https://novels.example.org/read/9/");
+    const elapsed = Date.now() - started;
+
+    expect(chapters).toHaveLength(1900);
+    expect(chapters[0]?.title).toContain("第1章");
+    expect(chapters.at(-1)?.title).toContain("第1900章");
+    expect(elapsed).toBeLessThan(1500);
+  });
+
+  it("加深嵌套不改变探测结果", () => {
+    const shallow = detectChapterList(parseHtml(nestedToc(60, 1)), base);
+    const deep = detectChapterList(parseHtml(nestedToc(60, 9)), base);
+    expect(deep.map((item) => item.title)).toEqual(shallow.map((item) => item.title));
+  });
+});

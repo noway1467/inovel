@@ -382,6 +382,74 @@ async function resolveTocUrl(
   return { url: raw ? resolveUrl(bookUrl, raw) : bookUrl, vars };
 }
 
+interface TocRules {
+  tocListRule: string;
+  tocNameRule: string;
+  tocUrlRule: string;
+  nextTocUrl?: string;
+}
+
+/**
+ * 在指定目录页上按同一套规则抓目录，跟随分页。
+ *
+ * 给「规则只刮到详情页最新章节预告」的情况用：跳到真正的目录页再抓一遍。
+ * 探测器不适合这一跳 —— 书源规则本来是对的，只是被套在了错的页面上，
+ * 换页面重跑规则比让通用探测重新猜结构准得多。
+ */
+async function chaptersFromTocPage(
+  ctx: Parameters<SourceAdapter["listChapters"]>[0],
+  tocPageUrl: string,
+  rules: TocRules,
+  vars: VarStore
+): Promise<SourceChapter[]> {
+  const chapters: SourceChapter[] = [];
+  const seen = new Set<string>();
+  const visited = new Set<string>();
+  let pageUrl: string | null = tocPageUrl;
+  let pages = 0;
+
+  const urlIsTemplate = /@get:\{/.test(rules.tocUrlRule) || /\{\{\s*\$\./.test(rules.tocUrlRule);
+
+  await delay(politeDelayMs);
+
+  while (pageUrl && pages < maxTocPages) {
+    if (visited.has(pageUrl)) break;
+    visited.add(pageUrl);
+    pages += 1;
+
+    const { doc } = await loadDocRaw(ctx, pageUrl);
+
+    const pageItems: SourceChapter[] = [];
+    for (const item of evalRuleNodes(doc, rules.tocListRule)) {
+      const title = evalRuleOne(item, rules.tocNameRule);
+      const href = urlIsTemplate
+        ? buildChapterUrlFromTemplate(rules.tocUrlRule, item, vars)
+        : evalRuleOne(item, rules.tocUrlRule);
+      if (!title || !href) continue;
+      pageItems.push({ externalKey: resolveUrl(pageUrl, href), title });
+    }
+
+    // 目录页顶上同样可能挂预告块，按页剥离，理由见 listChapters 里的注释
+    for (const item of stripLeadingDuplicates(pageItems, (entry) => entry.externalKey)) {
+      if (seen.has(item.externalKey)) continue;
+      seen.add(item.externalKey);
+      chapters.push(item);
+    }
+
+    const currentUrl: string = pageUrl;
+    const byRule: string | null = rules.nextTocUrl
+      ? nextPageUrl(doc, rules.nextTocUrl, currentUrl, visited)
+      : null;
+    const detected: string | null =
+      !byRule && doc.kind === "html" ? detectNextPageUrl(doc.node, currentUrl) : null;
+    const candidate = byRule ?? detected;
+    pageUrl = candidate && !visited.has(candidate) ? candidate : null;
+    if (pageUrl) await delay(paginationDelayMs);
+  }
+
+  return chapters;
+}
+
 export const rulesAdapter: SourceAdapter = {
   kind: "rules",
   label: "自定义 CSS 规则（兼容开源阅读书源）",
@@ -469,6 +537,8 @@ export const rulesAdapter: SourceAdapter = {
     let pages = 0;
     /** 首页原文，留给下面判杰奇用 */
     let firstBody = "";
+    /** 首页解析结果，留给下面找目录页入口用 */
+    let firstDoc: RuleDoc | null = null;
 
     while (pageUrl && pages < maxTocPages) {
       if (visited.has(pageUrl)) break;
@@ -478,7 +548,10 @@ export const rulesAdapter: SourceAdapter = {
       // 第一页可能是 POST（目录接口）；后续分页一律 GET
       const loaded = await loadDocRaw(ctx, pageUrl, pages === 1 ? tocRequest.init : undefined);
       const doc = loaded.doc;
-      if (pages === 1) firstBody = loaded.body;
+      if (pages === 1) {
+        firstBody = loaded.body;
+        firstDoc = doc;
+      }
 
       /**
        * 章节地址两种取法：
@@ -536,7 +609,36 @@ export const rulesAdapter: SourceAdapter = {
      */
     if (chapters.length > 0) {
       const viaJieqi = await tryJieqiToc(ctx, firstUrl, firstBody);
-      return viaJieqi.length > chapters.length ? viaJieqi : chapters;
+      if (viaJieqi.length > chapters.length) return viaJieqi;
+
+      /**
+       * 规则「有结果」并不等于「抓到完整目录」。
+       *
+       * 真实形态：书源的 tocList 指向详情页上那块「最新章节」预告
+       * （`<div class="update"><ul><li><a>…` 这类），选择器命中 5~12 条就返回，
+       * 整本书于是只剩最新几章，而且是倒序 —— 用户点开书直接看到大结局。
+       * 上一轮修的是探测路径（v8 剥预告段），规则路径压根没走到那儿：
+       * 这里一有结果就 return，detectWithTocHop 永远够不着。
+       *
+       * 判据要保守，别给正常的短篇白加一次请求：只在「一页就抓完 + 条目少
+       * 到不像一本书的完整目录 + 页面上确实有目录页入口」时才跳过去，
+       * 而且跳过去仍按同一套规则抓，谁多用谁。
+       */
+      const looksLikeTeaser = pages === 1 && chapters.length < 30;
+      if (looksLikeTeaser && firstDoc?.kind === "html") {
+        const tocPage = detectTocPageUrl(firstDoc.node, firstUrl);
+        if (tocPage && !visited.has(tocPage)) {
+          const hopped = await chaptersFromTocPage(
+            ctx,
+            tocPage,
+            { tocListRule, tocNameRule, tocUrlRule, nextTocUrl: config.nextTocUrl ?? undefined },
+            tocRequest.vars
+          );
+          if (hopped.length > chapters.length) return hopped;
+        }
+      }
+
+      return chapters;
     }
 
     /**

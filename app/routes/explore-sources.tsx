@@ -48,7 +48,7 @@ export async function loader({ request, context }: Route.LoaderArgs) {
     return {
       mode: "books" as const,
       sources: [],
-      result: await browseExplore(db, sourceId, category || null, page),
+      result: await browseExplore(db, env.R2_CONTENT, sourceId, category || null, page),
       error: null,
     };
   } catch (error) {
@@ -132,8 +132,21 @@ export default function ExploreSourcesPage({ loaderData }: Route.ComponentProps)
   }
 
   const currentSource = params.get("source") ?? "";
-  const categoryHref = (title: string, page = 1) =>
-    `/explore?source=${encodeURIComponent(currentSource)}&cat=${encodeURIComponent(title)}&page=${page}`;
+  /**
+   * 链接里带分类 id 而不是标题：同名分类真实存在（精武小说的「玄幻小说」
+   * 既在 /fenlei/1/ 又在 /fenlei/18/），按标题选会永远打开第一个，
+   * 用户点第二个标签看到的是第一个的书 —— 看起来就像标签重复。
+   */
+  const categoryHref = (id: string, page = 1) =>
+    `/explore?source=${encodeURIComponent(currentSource)}&cat=${encodeURIComponent(id)}&page=${page}`;
+
+  /** 按源自带的小标题分组，保持源里的先后顺序 */
+  const groups: { group: string; items: typeof result.categories }[] = [];
+  for (const item of result.categories) {
+    const last = groups[groups.length - 1];
+    if (last && last.group === item.group) last.items.push(item);
+    else groups.push({ group: item.group, items: [item] });
+  }
 
   return (
     <div className="mx-auto max-w-3xl space-y-4">
@@ -148,20 +161,35 @@ export default function ExploreSourcesPage({ loaderData }: Route.ComponentProps)
           <h1 className="text-lg font-semibold">{result.sourceName}</h1>
         </div>
 
-        {/* 分类标签。当前分类高亮，切换即换 URL，刷新也停在同一处 */}
-        <div className="mt-3 flex flex-wrap gap-1.5">
-          {result.categories.map((item) => (
-            <Button
-              key={item.title}
-              variant={item.title === result.category ? "default" : "outline"}
-              size="sm"
-              asChild
-            >
-              <Link to={categoryHref(item.title)}>
-                <Tag className="size-3.5" />
-                {item.title}
-              </Link>
-            </Button>
+        {/**
+         * 分类标签，按源自带的小标题分组。当前分类高亮，切换即换 URL。
+         *
+         * 分组是「标签看起来重复」的另一半原因：海棠书屋的「🌹排行🌹」和
+         * 「🌹分类🌹」两组下挂着同样的 24 个名字，指向的地址完全不同。
+         * 平铺出来就是 48 个标签、每个名字出现两次，谁也分不清点哪个。
+         */}
+        <div className="mt-3 space-y-2">
+          {groups.map((group) => (
+            <div key={group.group || "__ungrouped__"}>
+              {group.group && (
+                <p className="mb-1 text-xs font-medium text-muted-foreground">{group.group}</p>
+              )}
+              <div className="flex flex-wrap gap-1.5">
+                {group.items.map((item) => (
+                  <Button
+                    key={item.id}
+                    variant={item.id === result.categoryId ? "default" : "outline"}
+                    size="sm"
+                    asChild
+                  >
+                    <Link to={categoryHref(item.id)}>
+                      <Tag className="size-3.5" />
+                      {item.title}
+                    </Link>
+                  </Button>
+                ))}
+              </div>
+            </div>
           ))}
         </div>
       </header>
@@ -209,7 +237,7 @@ export default function ExploreSourcesPage({ loaderData }: Route.ComponentProps)
             asChild={result.page > 1}
           >
             {result.page > 1 ? (
-              <Link to={categoryHref(result.category ?? "", result.page - 1)}>
+              <Link to={categoryHref(result.categoryId ?? "", result.page - 1)}>
                 <ChevronLeft className="size-4" />
                 上一页
               </Link>
@@ -223,7 +251,7 @@ export default function ExploreSourcesPage({ loaderData }: Route.ComponentProps)
           <span className="text-xs text-muted-foreground">第 {result.page} 页</span>
           <Button variant="outline" size="sm" disabled={!result.hasMore} asChild={result.hasMore}>
             {result.hasMore ? (
-              <Link to={categoryHref(result.category ?? "", result.page + 1)}>
+              <Link to={categoryHref(result.categoryId ?? "", result.page + 1)}>
                 下一页
                 <ChevronRight className="size-4" />
               </Link>

@@ -2,6 +2,7 @@ import { eq } from "drizzle-orm";
 import type { R2Bucket } from "@cloudflare/workers-types";
 import { contentSources, sourceStatus } from "drizzle/schema";
 import type { AppDb } from "~/server/db";
+import { cacheKey, keyHash, readCache, writeCache } from "~/server/sources/cache";
 import { getAdapter } from "~/server/sources/registry";
 import type { SourceChapter } from "~/server/sources/types";
 
@@ -19,73 +20,12 @@ import type { SourceChapter } from "~/server/sources/types";
 const tocCacheTtlMs = 30 * 60 * 1000;
 const contentCacheTtlMs = 7 * 24 * 60 * 60 * 1000;
 
-/**
- * 抓取管线版本号。**改动抓取/解析逻辑时必须 +1。**
- *
- * 为什么需要它：正文缓存 7 天。修好分页跟随之后，早先存进去的截断正文
- * （只有第一页）会继续供 7 天 —— 部署完全正确，用户看到的还是旧内容，
- * 而且没有任何迹象说明问题出在缓存。上一轮就是这样，只能手动逐章删 R2。
- *
- * 版本号进 key，改一次逻辑就等于把旧缓存全部作废，旧对象自然失活
- * （R2 生命周期规则回收，不影响读取）。
- *
- * v2: 跟随正文/目录分页（数字分页器、`>` 符号、地址形状），滤掉翻页提示行
- * v3: 按响应编码解码（gbk/gb2312/big5），此前写死 utf-8，gbk 站缓存的是乱码
- * v4: 套用书源自带的净化规则（replaceRegex），旧缓存里是没净化的正文
- * v5: 过浏览器验证挑战 + 目录探测按地址形状剔除杂链，旧缓存里存的是验证页
- *     文字与一堆假章节
- * v6: 支持 POST 目录接口（源站「完整目录」按钮），旧缓存里只有详情页刮到的
- *     最新几章
- * v7: 目录探测按章节序号排序，并保留 title/alt 里的源站标题；
- *     旧缓存保存了“最新章节块”的倒序/缺序结果
- * v8: 剥掉目录开头的「最新章节」预告段（含详情页信息栏那一行），旧缓存里
- *     第 1 条是全书最后一章 —— 打开书直接剧透大结局
- */
-const pipelineVersion = "v8";
-
-/** 源地址不能直接当 R2 键（含协议与斜杠），用摘要 */
-async function keyHash(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-  return [...new Uint8Array(digest)]
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("")
-    .slice(0, 32);
-}
-
 function tocCacheKey(sourceId: string, hash: string) {
-  return `source-cache/${pipelineVersion}/${sourceId}/toc/${hash}.json`;
+  return cacheKey(sourceId, "toc", hash);
 }
 
 function contentCacheKey(sourceId: string, hash: string) {
-  return `source-cache/${pipelineVersion}/${sourceId}/content/${hash}.json`;
-}
-
-interface CachedEnvelope<T> {
-  cachedAt: number;
-  data: T;
-}
-
-async function readCache<T>(
-  bucket: R2Bucket,
-  key: string,
-  ttlMs: number
-): Promise<T | null> {
-  try {
-    const object = await bucket.get(key);
-    if (!object) return null;
-    const parsed = JSON.parse(await object.text()) as CachedEnvelope<T>;
-    if (Date.now() - parsed.cachedAt > ttlMs) return null;
-    return parsed.data;
-  } catch {
-    return null;
-  }
-}
-
-async function writeCache<T>(bucket: R2Bucket, key: string, data: T): Promise<void> {
-  const envelope: CachedEnvelope<T> = { cachedAt: Date.now(), data };
-  await bucket.put(key, JSON.stringify(envelope), {
-    httpMetadata: { contentType: "application/json" },
-  });
+  return cacheKey(sourceId, "content", hash);
 }
 
 async function loadEnabledSource(db: AppDb, sourceId: string) {
@@ -116,18 +56,27 @@ export interface LiveTocResult {
   fromCache: boolean;
 }
 
-/** 拉某本书在源上的目录 */
+/**
+ * 拉某本书在源上的目录。
+ *
+ * @param refresh 跳过缓存重抓。给「刷新目录」按钮用 —— 源站更新了新章节，
+ *   而缓存还有效时，用户需要一个能立刻看到新章的手段。写回照常，
+ *   所以刷新一次之后其他人也受益。
+ */
 export async function getLiveToc(
   db: AppDb,
   bucket: R2Bucket,
   sourceId: string,
-  bookUrl: string
+  bookUrl: string,
+  refresh = false
 ): Promise<LiveTocResult> {
   const source = await loadEnabledSource(db, sourceId);
   const hash = await keyHash(bookUrl);
   const key = tocCacheKey(sourceId, hash);
 
-  const cached = await readCache<{ title: string; key: string }[]>(bucket, key, tocCacheTtlMs);
+  const cached = refresh
+    ? null
+    : await readCache<{ title: string; key: string }[]>(bucket, key, tocCacheTtlMs);
   if (cached) {
     return {
       sourceId,
