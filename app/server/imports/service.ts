@@ -270,11 +270,15 @@ async function resolveBookIdForImport(
 
 // 同一用户重复上传同名同大小文件时，复用仍在解析或待导入的任务，
 // 避免同一个文件被反复解析（每次解析都消耗 Worker CPU，容易触发 1102）。
+//
+// 指定了目标作品时必须连 bookId 一起比：否则先把 x.txt 传成新书、再选「已有作品」
+// 传同一个 x.txt，会复用前一个任务，章节整批落进上一本书，选中的作品里什么都不多。
 async function findExistingImportJob(
   db: AppDb,
   userId: string,
   fileName: string,
-  fileSize: number
+  fileSize: number,
+  bookId?: string
 ) {
   const sourceName = fileName.split(/[\\/]/).pop() ?? fileName;
   return db
@@ -285,7 +289,8 @@ async function findExistingImportJob(
         eq(importJobs.createdBy, userId),
         eq(importJobs.sourceName, sourceName),
         eq(importJobs.sourceSize, fileSize),
-        inArray(importJobs.status, ["uploaded", "parsing", "awaiting_confirmation"])
+        inArray(importJobs.status, ["uploaded", "parsing", "awaiting_confirmation"]),
+        ...(bookId ? [eq(importJobs.bookId, bookId)] : [])
       )
     )
     .orderBy(desc(importJobs.createdAt))
@@ -311,7 +316,13 @@ export async function createImportJob(
   if (input.file.size > directUploadMaxBytes) {
     throw new Error(`${ext.toUpperCase()} 文件超过 8MB，请使用分片上传`);
   }
-  const existing = await findExistingImportJob(db, userId, input.file.name, input.file.size);
+  const existing = await findExistingImportJob(
+    db,
+    userId,
+    input.file.name,
+    input.file.size,
+    input.bookId
+  );
   if (existing) {
     return getImportJob(db, bucket, existing.id);
   }
@@ -476,7 +487,8 @@ export async function startChunkedImport(
     db,
     userId,
     input.fileName,
-    Math.round(input.fileSize)
+    Math.round(input.fileSize),
+    input.bookId
   );
   if (existing) {
     throw new Error("该文件正在解析或待导入中，请勿重复上传");
@@ -947,12 +959,35 @@ export async function confirmImport(
     .from(volumes)
     .where(eq(volumes.bookId, job.bookId))
     .orderBy(volumes.sortOrder);
-  const volumeByTitle = new Map(existingVolumes.map((volume) => [volume.title, volume]));
+  // 目录是按卷分组渲染的，所以“接在末尾”不只看章节 sortOrder，还要看落在哪一卷。
+  // 旧实现按卷名复用任意已有卷：书里已有第一卷/第二卷时，再传一个同名第一卷的
+  // 文件，新章节虽然拿到了最大的 sortOrder，却被塞回第一卷，读者看到的是全书中部。
+  // 因此只复用两种卷：本任务自己建过的（断点续传要接着写），以及恰好是全书最后
+  // 一卷且卷名对得上的（正常续写同一卷）。其余一律在末尾新建卷。
+  const volumeIdForTitleIndex = (titleIndex: number) =>
+    `${jobId}-${titleIndex.toString(16).padStart(8, "0")}-03`;
+  const jobVolumesById = new Map(
+    existingVolumes
+      .filter((volume) => volume.id.startsWith(`${jobId}-`))
+      .map((volume) => [volume.id, volume])
+  );
+  // 判断“最后一卷”时排除本任务建的卷，这样每个分片算出的结论都一样。
+  const priorVolumes = existingVolumes.filter((volume) => !volume.id.startsWith(`${jobId}-`));
+  const lastPriorVolume = priorVolumes[priorVolumes.length - 1];
+  const volumeByTitle = new Map<string, (typeof existingVolumes)[number]>();
   let nextVolumeSortOrder =
     existingVolumes.reduce((max, volume) => Math.max(max, volume.sortOrder), -1) + 1;
   for (const [titleIndex, title] of selectedVolumeTitles.entries()) {
-    if (volumeByTitle.has(title)) continue;
-    const volumeId = `${jobId}-${titleIndex.toString(16).padStart(8, "0")}-03`;
+    const volumeId = volumeIdForTitleIndex(titleIndex);
+    const createdByThisJob = jobVolumesById.get(volumeId);
+    if (createdByThisJob) {
+      volumeByTitle.set(title, createdByThisJob);
+      continue;
+    }
+    if (titleIndex === 0 && lastPriorVolume?.title === title) {
+      volumeByTitle.set(title, lastPriorVolume);
+      continue;
+    }
     await db
       .insert(volumes)
       .values({
@@ -967,6 +1002,11 @@ export async function confirmImport(
     nextVolumeSortOrder += 1;
     volumeByTitle.set(title, inserted);
   }
+  // 兜底卷：正文缺 volumeTitle 时用本任务的第一卷，不能再假定书里一定有“正文”。
+  const fallbackVolume =
+    volumeByTitle.get(selectedVolumeTitles[0] ?? defaultVolumeTitle) ??
+    volumeByTitle.get(defaultVolumeTitle);
+  if (!fallbackVolume) throw new Error("创建卷目录失败");
 
   // 单请求按“章节数 + 正文字数”双阈值切片：短章一次多提交（最多 64 章），
   // 长章自动缩小批次；章节内容并发写 R2，减少大书确认导入的往返次数，
@@ -1151,7 +1191,7 @@ export async function confirmImport(
         bookId: job.bookId,
         volumeId:
           volumeByTitle.get(resolvedEntry.volumeTitle || defaultVolumeTitle)?.id ??
-          volumeByTitle.get(defaultVolumeTitle)!.id,
+          fallbackVolume.id,
         // 改名按候选章节自身的 index 查，不能用选中序号 globalIndex。
         title: chapterTitle,
         sortOrder: sortBase + globalIndex + 1,
