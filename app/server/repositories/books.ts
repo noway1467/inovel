@@ -207,6 +207,36 @@ function fetchBookRows(db: AppDb, bookIds: string[]) {
 }
 
 /**
+ * 按章节的全局 sortOrder 走一遍，卷号一变就切一段。
+ *
+ * 原来是"按卷分组、组内再筛章节"，于是目录顺序由卷的 sortOrder 决定，作者在
+ * 作品管理里改章节顺序后目录不跟着动；没有卷的章节（volumeId 为 null）
+ * 更是直接从目录里消失。改成跟着章节走：目录永远等于章节顺序，卷名只是
+ * 中间的分隔标题。同一卷被拆到两段时各自成段（`id` 带段序号保证 key 唯一），
+ * 这正确反映了"这卷的章节不连续"这件事。
+ */
+function groupChaptersIntoSegments<T extends { volumeId: string | null }>(
+  chapterRows: T[],
+  volumeTitles: Map<string, string>
+) {
+  const segments: { id: string; volumeId: string | null; title: string; chapters: T[] }[] = [];
+  for (const chapter of chapterRows) {
+    const last = segments[segments.length - 1];
+    if (last && last.volumeId === chapter.volumeId) {
+      last.chapters.push(chapter);
+      continue;
+    }
+    segments.push({
+      id: `${chapter.volumeId ?? "unsorted"}#${segments.length}`,
+      volumeId: chapter.volumeId,
+      title: (chapter.volumeId ? volumeTitles.get(chapter.volumeId) : null) ?? "正文",
+      chapters: [chapter],
+    });
+  }
+  return segments;
+}
+
+/**
  * 作品详情页目录。
  *
  * includeUnpublished 默认 false：阅读页会拒绝未发布章节，详情页若照旧展示
@@ -243,9 +273,12 @@ export async function listBookChapters(db: AppDb, bookId: string, includeUnpubli
     )
     .orderBy(ascOrder(chapters.sortOrder));
 
-  return volumeRows.map((volume) => ({
-    ...volume,
-    chapters: chapterRows.filter((chapter) => chapter.volumeId === volume.id),
+  const volumeTitles = new Map(volumeRows.map((volume) => [volume.id, volume.title]));
+  return groupChaptersIntoSegments(chapterRows, volumeTitles).map((segment) => ({
+    id: segment.id,
+    title: segment.title,
+    sortOrder: segment.chapters[0]?.sortOrder ?? 0,
+    chapters: segment.chapters,
   }));
 }
 
@@ -381,12 +414,11 @@ export async function listBookTocMinimal(
       .orderBy(ascOrder(chapters.sortOrder)),
   ]);
 
-  return volumeRows.map((volume) => ({
-    id: volume.id,
-    title: volume.title,
-    chapters: chapterRows
-      .filter((chapter) => chapter.volumeId === volume.id)
-      .map((chapter) => ({ id: chapter.id, title: chapter.title })),
+  const volumeTitles = new Map(volumeRows.map((volume) => [volume.id, volume.title]));
+  return groupChaptersIntoSegments(chapterRows, volumeTitles).map((segment) => ({
+    id: segment.id,
+    title: segment.title,
+    chapters: segment.chapters.map((chapter) => ({ id: chapter.id, title: chapter.title })),
   }));
 }
 

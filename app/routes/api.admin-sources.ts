@@ -37,6 +37,13 @@ import {
   verifySources,
   type VerifyFailReason,
 } from "~/server/sources/verify";
+import {
+  auditSourcesExplore,
+  getCleanupReasonCounts,
+  getExploreAuditOverview,
+  purgeSourcesByCleanupReason,
+  type SourceCleanupReason,
+} from "~/server/sources/explore-audit";
 import { createSubscription, syncSource, syncSubscriptionToc } from "~/server/sources/sync";
 
 /**
@@ -137,6 +144,9 @@ export async function loader({ request, context }: Route.LoaderArgs) {
     verifyOverview: await getVerifyOverview(admin.db),
     // 各失败原因的数量，管理台据此显示「删掉这 N 个」
     failReasons: await getFailReasonCounts(admin.db),
+    exploreOverview: await getExploreAuditOverview(admin.db),
+    // 没有分类浏览 / 分类里没数据 / 不能搜索，三类各多少个
+    cleanupReasons: await getCleanupReasonCounts(admin.db),
   });
 }
 
@@ -264,6 +274,42 @@ export async function action({ request, context }: Route.ActionArgs) {
         ? (body.reasons.filter((item) => typeof item === "string") as VerifyFailReason[])
         : undefined;
       const result = await purgeFailedSources(admin.db, reasons);
+      return Response.json(result);
+    }
+
+    // 分批实测分类浏览（真跑一遍第一个分类，看抓不抓到书）
+    if (path.includes("/explore-audit")) {
+      const body = (await request.json().catch(() => ({}))) as {
+        limit?: number;
+        sourceIds?: string[];
+        recheck?: boolean;
+      };
+      const result = await auditSourcesExplore(admin.db, {
+        limit: body.limit,
+        sourceIds: body.sourceIds ?? null,
+        recheck: body.recheck,
+      });
+      return Response.json(result);
+    }
+
+    /**
+     * 按「没有分类浏览 / 分类里没数据 / 不能搜索」清源。
+     *
+     * 三类分开传：只有分类入口的源，删掉"不能搜索"那一类就把它们一起端了 ——
+     * 而分类恰是它们唯一的入口。让运营方自己挑。
+     */
+    if (path.includes("/purge-unusable")) {
+      const body = (await request.json().catch(() => ({}))) as { reasons?: string[] };
+      const allowed: SourceCleanupReason[] = ["no_explore", "explore_empty", "not_searchable"];
+      const reasons = Array.isArray(body.reasons)
+        ? body.reasons.filter((item): item is SourceCleanupReason =>
+            allowed.includes(item as SourceCleanupReason)
+          )
+        : [];
+      if (reasons.length === 0) {
+        return Response.json({ error: "reasons required" }, { status: 400 });
+      }
+      const result = await purgeSourcesByCleanupReason(admin.db, reasons);
       return Response.json(result);
     }
 

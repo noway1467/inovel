@@ -29,6 +29,9 @@ import { ensureAuthorProfile } from "~/server/creator/profile";
 // 大书一次性更新几千行容易把 Worker 顶到 1102，批量提交/发布按小片推进。
 const submitAllBatchSize = 20;
 const publishAllBatchSize = 20;
+const reorderBatchSize = 50;
+// 每片要跑 6 条 inArray 语句，片长按 D1 单语句 ~100 个绑定参数的上限留足余量
+const deleteChaptersBatchSize = 40;
 
 export interface ChapterEditView {
   id: string;
@@ -363,6 +366,133 @@ export async function deleteChapter(db: AppDb, chapterId: string, userId: string
     })
     .where(eq(books.id, chapter.bookId));
   return { ok: true };
+}
+
+/**
+ * 重排一页章节的顺序。
+ *
+ * 只动传进来的这批章节：取它们现有的 sortOrder 升序排好，再按新顺序逐个贴回去。
+ * 这样交换只发生在这批之内，不碰前后页的章节，也不用把整本书重新编号 ——
+ * 一本几千章的书全量 renumber 一次就够顶到 1102。
+ */
+export async function reorderChapters(
+  db: AppDb,
+  bookId: string,
+  chapterIds: string[],
+  userId: string
+) {
+  const author = await authorOf(db, userId);
+  if (!author) return null;
+  const book = await db
+    .select({ id: books.id, authorId: books.authorId })
+    .from(books)
+    .where(eq(books.id, bookId))
+    .get();
+  if (!book || book.authorId !== author.id) return null;
+
+  const uniqueIds = [...new Set(chapterIds)];
+  if (uniqueIds.length === 0) return { reordered: 0 };
+
+  const rows = await db
+    .select({ id: chapters.id, sortOrder: chapters.sortOrder })
+    .from(chapters)
+    .where(and(eq(chapters.bookId, bookId), inArray(chapters.id, uniqueIds)));
+  // 传进来的 id 必须全部属于这本书，缺一个就说明客户端拿的是过期列表，整批拒掉
+  if (rows.length !== uniqueIds.length) return null;
+
+  const slots = rows.map((row) => row.sortOrder).sort((a, b) => a - b);
+  const current = new Map(rows.map((row) => [row.id, row.sortOrder]));
+  const updates = uniqueIds
+    .map((id, index) => ({ id, sortOrder: slots[index]! }))
+    .filter((item) => current.get(item.id) !== item.sortOrder);
+  if (updates.length === 0) return { reordered: 0 };
+
+  const now = new Date();
+  for (let index = 0; index < updates.length; index += reorderBatchSize) {
+    const slice = updates.slice(index, index + reorderBatchSize);
+    await db.batch(
+      toBatchStatements(
+        slice.map((item) =>
+          db
+            .update(chapters)
+            .set({ sortOrder: item.sortOrder, updatedAt: now })
+            .where(eq(chapters.id, item.id))
+        )
+      )
+    );
+  }
+
+  await refreshBookLatestChapter(db, bookId);
+  return { reordered: updates.length };
+}
+
+/** 批量删除章节：清掉引用它们的阅读数据，再删章节本身，最后重算作品统计。 */
+export async function deleteChaptersBatch(
+  db: AppDb,
+  bookId: string,
+  chapterIds: string[],
+  userId: string
+) {
+  const author = await authorOf(db, userId);
+  if (!author) return null;
+  const book = await db
+    .select({ id: books.id, authorId: books.authorId })
+    .from(books)
+    .where(eq(books.id, bookId))
+    .get();
+  if (!book || book.authorId !== author.id) return null;
+
+  const uniqueIds = [...new Set(chapterIds)];
+  if (uniqueIds.length === 0) return { deleted: 0 };
+
+  const owned = await db
+    .select({ id: chapters.id })
+    .from(chapters)
+    .where(and(eq(chapters.bookId, bookId), inArray(chapters.id, uniqueIds)));
+  const targetIds = owned.map((row) => row.id);
+  if (targetIds.length === 0) return { deleted: 0 };
+
+  // inArray 会把每个 id 展开成一个绑定参数，D1 单条语句上限 ~100 个，按片走
+  for (let index = 0; index < targetIds.length; index += deleteChaptersBatchSize) {
+    const slice = targetIds.slice(index, index + deleteChaptersBatchSize);
+    await db
+      .update(readingProgress)
+      .set({ chapterId: null, paragraphAnchor: null, charOffset: 0, chapterProgress: 0 })
+      .where(inArray(readingProgress.chapterId, slice));
+    await db.delete(readingHistory).where(inArray(readingHistory.chapterId, slice));
+    await db.delete(bookmarks).where(inArray(bookmarks.chapterId, slice));
+    await db.delete(reviewTasks).where(inArray(reviewTasks.chapterId, slice));
+    await db.delete(chapterVersions).where(inArray(chapterVersions.chapterId, slice));
+    await db.delete(chapters).where(inArray(chapters.id, slice));
+  }
+
+  await refreshBookLatestChapter(db, bookId);
+  return { deleted: targetIds.length };
+}
+
+/** 章节增删或改序后重算作品的字数与"最新章节"。 */
+async function refreshBookLatestChapter(db: AppDb, bookId: string) {
+  const stats = await db
+    .select({ total: sql<number>`coalesce(sum(${chapters.wordCount}), 0)` })
+    .from(chapters)
+    .where(and(eq(chapters.bookId, bookId), sql`${chapters.deletedAt} IS NULL`))
+    .get();
+  const latest = await db
+    .select({ id: chapters.id, title: chapters.title })
+    .from(chapters)
+    .where(and(eq(chapters.bookId, bookId), sql`${chapters.deletedAt} IS NULL`))
+    .orderBy(desc(chapters.sortOrder))
+    .limit(1)
+    .get();
+  await db
+    .update(books)
+    .set({
+      wordCount: stats?.total ?? 0,
+      latestChapterId: latest?.id ?? null,
+      latestChapterTitle: latest?.title ?? null,
+      latestChapterAt: latest ? new Date() : null,
+    })
+    .where(eq(books.id, bookId));
 }
 
 export type BookSerialStatus = "ongoing" | "completed";

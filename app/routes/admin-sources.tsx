@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router";
 import {
   CloudDownload,
+  Compass,
   Download,
   Loader2,
   Pause,
@@ -137,6 +138,8 @@ export default function AdminSourcesPage({ loaderData }: Route.ComponentProps) {
   const [restrictionEnabled, setRestrictionEnabled] = useState(false);
   const [verifyOverview, setVerifyOverview] = useState<VerifyOverview | null>(null);
   const [failReasons, setFailReasons] = useState<FailReasonCount[] | null>(null);
+  const [exploreOverview, setExploreOverview] = useState<ExploreOverview | null>(null);
+  const [cleanupReasons, setCleanupReasons] = useState<CleanupReasonCount[] | null>(null);
   const [quickResult, setQuickResult] = useState<QuickImportResult | null>(null);
   const [batchResult, setBatchResult] = useState<BatchImportResult | null>(null);
   const [selected, setSelected] = useState<string[]>([]);
@@ -167,6 +170,8 @@ export default function AdminSourcesPage({ loaderData }: Route.ComponentProps) {
         adapters?: AdapterInfo[];
         verifyOverview?: VerifyOverview;
         failReasons?: FailReasonCount[];
+        exploreOverview?: ExploreOverview;
+        cleanupReasons?: CleanupReasonCount[];
       },
       { domains?: DomainRow[]; restrictionEnabled?: boolean },
       { subscriptions?: SubscriptionRow[] },
@@ -177,6 +182,8 @@ export default function AdminSourcesPage({ loaderData }: Route.ComponentProps) {
     setAdapters(main.adapters ?? []);
     setVerifyOverview(main.verifyOverview ?? null);
     setFailReasons(main.failReasons ?? null);
+    setExploreOverview(main.exploreOverview ?? null);
+    setCleanupReasons(main.cleanupReasons ?? null);
     setDomains(domainRes.domains ?? []);
     setRestrictionEnabled(Boolean(domainRes.restrictionEnabled));
     setSubscriptions(subRes.subscriptions ?? []);
@@ -288,6 +295,12 @@ export default function AdminSourcesPage({ loaderData }: Route.ComponentProps) {
           <VerifyPanel
             overview={verifyOverview}
             failReasons={failReasons}
+            busy={busy}
+            onDone={loadAll}
+          />
+          <CleanupPanel
+            overview={exploreOverview}
+            cleanupReasons={cleanupReasons}
             busy={busy}
             onDone={loadAll}
           />
@@ -1014,6 +1027,241 @@ function VerifyPanel({
                 }
               >
                 {outcome.status === "ok" ? "✓" : outcome.status === "skipped" ? "–" : "✗"}
+              </span>
+              <span className="shrink-0 font-medium">{outcome.sourceName}</span>
+              <span className="min-w-0 truncate text-muted-foreground">{outcome.message}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+interface ExploreOverview {
+  ok: number;
+  empty: number;
+  failed: number;
+  untested: number;
+}
+
+/** 三类可清理原因各多少个源 */
+interface CleanupReasonCount {
+  reason: string;
+  label: string;
+  hint: string;
+  count: number;
+}
+
+interface ExploreAuditOutcome {
+  sourceId: string;
+  sourceName: string;
+  status: "ok" | "empty" | "failed";
+  books: number;
+  message: string;
+}
+
+interface ExploreAuditResponse {
+  outcomes: ExploreAuditOutcome[];
+  totals: { checked: number; ok: number; empty: number; failed: number; remaining: number };
+  error?: string;
+}
+
+/**
+ * 清理用不上的源。
+ *
+ * 与「筛选可用源」分开：那套测的是搜索 + 目录，只有分类入口的源在那里会被判
+ * 「待人工」，永远清不掉。这里按三类分别清 —— 没有分类浏览、分类里没有数据、
+ * 不能搜索。分开是必需的：只有分类入口的源要是跟着「不能搜索」一起删，
+ * 就把分类浏览的主力源端了。
+ */
+function CleanupPanel({
+  overview,
+  cleanupReasons,
+  busy,
+  onDone,
+}: {
+  overview: ExploreOverview | null;
+  cleanupReasons: CleanupReasonCount[] | null;
+  busy: boolean;
+  onDone: () => Promise<void>;
+}) {
+  const [running, setRunning] = useState(false);
+  const [outcomes, setOutcomes] = useState<ExploreAuditOutcome[]>([]);
+  const [progress, setProgress] = useState({
+    checked: 0,
+    ok: 0,
+    empty: 0,
+    failed: 0,
+    remaining: 0,
+  });
+  const [error, setError] = useState("");
+  const stopRef = useRef(false);
+
+  /** 连续跑到没有未测源为止；每批只测几个，避开单请求资源上限 */
+  async function runAudit(recheck = false) {
+    setRunning(true);
+    setError("");
+    setOutcomes([]);
+    setProgress({ checked: 0, ok: 0, empty: 0, failed: 0, remaining: 0 });
+    stopRef.current = false;
+
+    try {
+      for (let round = 0; round < 200; round += 1) {
+        if (stopRef.current) break;
+        const response = await fetch("/api/admin/sources/explore-audit", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ recheck }),
+        });
+        const data = (await response.json()) as ExploreAuditResponse;
+        if (!response.ok) {
+          setError(data.error ?? "实测失败");
+          break;
+        }
+        setOutcomes((prev) => [...data.outcomes, ...prev].slice(0, 80));
+        setProgress((prev) => ({
+          checked: prev.checked + data.totals.checked,
+          ok: prev.ok + data.totals.ok,
+          empty: prev.empty + data.totals.empty,
+          failed: prev.failed + data.totals.failed,
+          remaining: data.totals.remaining,
+        }));
+        if (data.totals.checked === 0) break;
+        // 复检模式下 remaining 一直是 0（都测过了），只跑一轮
+        if (recheck || data.totals.remaining === 0) break;
+      }
+      await onDone();
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  async function purge(reason: string, label: string, count: number) {
+    if (!window.confirm(`确定删除「${label}」的 ${count} 个源吗？已入库的书籍不受影响。`)) return;
+    const response = await fetch("/api/admin/sources/purge-unusable", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ reasons: [reason] }),
+    });
+    const data = (await response.json()) as { deleted?: number; error?: string };
+    if (!response.ok) {
+      setError(data.error ?? "清理失败");
+      return;
+    }
+    setError("");
+    await onDone();
+  }
+
+  const totalThisRun = progress.checked + progress.remaining;
+  const percent =
+    totalThisRun > 0 ? Math.min(100, Math.round((progress.checked / totalThisRun) * 100)) : 0;
+
+  return (
+    <section className="rounded-lg border border-border bg-surface p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <h2 className="flex items-center gap-1.5 text-sm font-semibold">
+          <Compass className="size-4" />
+          清理用不上的源
+        </h2>
+        {overview && (
+          <div className="flex items-center gap-1.5 text-xs">
+            <Badge variant="success">分类有书 {overview.ok}</Badge>
+            <Badge variant="danger">分类空 {overview.empty + overview.failed}</Badge>
+            <Badge variant="secondary">未测 {overview.untested}</Badge>
+          </div>
+        )}
+        <div className="ml-auto flex items-center gap-1.5">
+          {running ? (
+            <Button size="sm" variant="secondary" onClick={() => (stopRef.current = true)}>
+              <Pause className="size-3.5" />
+              停止
+            </Button>
+          ) : (
+            <>
+              <Button size="sm" disabled={busy} onClick={() => void runAudit(false)}>
+                分类实测
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={busy}
+                title="已测过的源再跑一遍，源站改版后原本能抓的也会失效"
+                onClick={() => void runAudit(true)}
+              >
+                复检
+              </Button>
+            </>
+          )}
+        </div>
+      </div>
+
+      <p className="mt-1 text-xs text-muted-foreground">
+        「分类里没有数据」要先跑实测才算得出来：配置里有发现页地址不等于分类页真能抓到书，源站改版后规则还在、点进去却是一片空白。
+      </p>
+
+      {cleanupReasons && cleanupReasons.length > 0 && (
+        <div className="mt-2 rounded-md border border-border/60 bg-background p-2">
+          <p className="mb-1.5 text-xs font-medium text-muted-foreground">
+            按类清理（点一类只删这一类）
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            {cleanupReasons.map((item) => (
+              <Button
+                key={item.reason}
+                size="sm"
+                variant="outline"
+                className="h-7 px-2 text-xs"
+                disabled={running || busy || item.count === 0}
+                title={item.hint}
+                onClick={() => void purge(item.reason, item.label, item.count)}
+              >
+                <Trash2 className="size-3 opacity-60" />
+                {item.label} {item.count}
+              </Button>
+            ))}
+          </div>
+          <p className="mt-1.5 text-[11px] text-muted-foreground">
+            一个源可能同时命中两类（既没有分类又不能搜索），两个数字会重复计它。删「不能搜索」会连带删掉只有分类入口的源 ——
+            那批源分类是唯一入口，通常该留。
+          </p>
+        </div>
+      )}
+
+      {(running || progress.checked > 0) && (
+        <div className="mt-2">
+          <div className="h-1 w-full overflow-hidden rounded-full bg-border">
+            <div
+              className="h-full bg-primary transition-[width] duration-300"
+              style={{ width: `${percent}%` }}
+            />
+          </div>
+          <p className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
+            {running && <Loader2 className="size-3 animate-spin" />}
+            已测 {progress.checked}
+            {totalThisRun > progress.checked && `/${totalThisRun}`} · 有书 {progress.ok} · 空{" "}
+            {progress.empty} · 报错 {progress.failed}
+            {progress.remaining > 0 && ` · 剩余 ${progress.remaining}`}
+          </p>
+        </div>
+      )}
+
+      {error && <p className="mt-2 text-sm text-danger">{error}</p>}
+
+      {outcomes.length > 0 && (
+        <ul className="mt-2 max-h-56 divide-y divide-border/50 overflow-y-auto rounded border border-border/60 text-xs">
+          {outcomes.map((outcome, i) => (
+            <li key={`${outcome.sourceId}-${i}`} className="flex items-baseline gap-1.5 px-2 py-1">
+              <span
+                className={
+                  outcome.status === "ok"
+                    ? "shrink-0 text-success"
+                    : outcome.status === "empty"
+                      ? "shrink-0 text-muted-foreground"
+                      : "shrink-0 text-danger"
+                }
+              >
+                {outcome.status === "ok" ? "✓" : outcome.status === "empty" ? "–" : "✗"}
               </span>
               <span className="shrink-0 font-medium">{outcome.sourceName}</span>
               <span className="min-w-0 truncate text-muted-foreground">{outcome.message}</span>

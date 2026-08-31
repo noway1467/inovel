@@ -1,6 +1,18 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router";
-import { BookOpen, ChevronLeft, ExternalLink, Loader2, Save, Send, Trash2 } from "lucide-react";
+import {
+  BookOpen,
+  ChevronDown,
+  ChevronLeft,
+  ChevronUp,
+  ExternalLink,
+  GripVertical,
+  Loader2,
+  Save,
+  Send,
+  Trash2,
+  X,
+} from "lucide-react";
 import type { Route } from "./+types/creator-book";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
@@ -15,7 +27,9 @@ import {
 } from "~/components/ui/select";
 import { Textarea } from "~/components/ui/textarea";
 import { Switch } from "~/components/ui/switch";
+import { Checkbox } from "~/components/ui/checkbox";
 import { EmptyState } from "~/components/state/empty-state";
+import { openBookLinkProps } from "~/lib/open-book";
 import { pageMeta, pageTitle } from "~/lib/page-title";
 import { cloudflareContext } from "~/server/context";
 import { createDb } from "~/server/db";
@@ -133,6 +147,21 @@ export default function CreatorBookPage({ loaderData }: Route.ComponentProps) {
   const [directPublish, setDirectPublish] = useState(false);
   const [chapterPage, setChapterPage] = useState(1);
   const chapterPageSize = 100;
+
+  // 拖动、勾选、批量删除都在本地列表上改，存盘成功后本地就是最新顺序，不必刷页
+  const [chapterList, setChapterList] = useState(chapterRows);
+  const [orderDirty, setOrderDirty] = useState(false);
+  const [savingOrder, setSavingOrder] = useState(false);
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [dragId, setDragId] = useState<string | null>(null);
+
+  useEffect(() => {
+    setChapterList(chapterRows);
+    setOrderDirty(false);
+    setSelectedIds([]);
+    setDragId(null);
+  }, [chapterRows]);
 
   useEffect(() => {
     if (!directPublishStorageKey || typeof localStorage === "undefined") return;
@@ -333,11 +362,130 @@ export default function CreatorBookPage({ loaderData }: Route.ComponentProps) {
     }
   }
 
-  const chapterPageCount = Math.max(1, Math.ceil(chapterRows.length / chapterPageSize));
-  const visibleChapters = chapterRows.slice(
-    (chapterPage - 1) * chapterPageSize,
-    chapterPage * chapterPageSize
-  );
+  const chapterPageCount = Math.max(1, Math.ceil(chapterList.length / chapterPageSize));
+  const pageStart = (chapterPage - 1) * chapterPageSize;
+  const visibleChapters = chapterList.slice(pageStart, pageStart + chapterPageSize);
+  // 这几个派生值写在早退分支之后，只能直算，不能用 useMemo（hooks 顺序）
+  const visibleIds = visibleChapters.map((chapter) => chapter.id);
+  const selectedSet = new Set(selectedIds);
+  const selectedOnPage = visibleIds.filter((id) => selectedSet.has(id)).length;
+  const allOnPageSelected = visibleIds.length > 0 && selectedOnPage === visibleIds.length;
+
+  /** 把某一章在整册列表里挪 delta 步，只在当前页范围内移动。 */
+  function moveChapter(chapterId: string, delta: number) {
+    setChapterList((list) => {
+      const from = list.findIndex((chapter) => chapter.id === chapterId);
+      if (from < 0) return list;
+      const to = from + delta;
+      // 不允许跨页拖：换页后前后邻居会跳，用户很难预期结果
+      if (to < pageStart || to >= Math.min(pageStart + chapterPageSize, list.length)) return list;
+      const next = [...list];
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, moved!);
+      return next;
+    });
+    setOrderDirty(true);
+  }
+
+  function dropChapterOn(targetId: string) {
+    if (!dragId || dragId === targetId) return;
+    setChapterList((list) => {
+      const from = list.findIndex((chapter) => chapter.id === dragId);
+      const to = list.findIndex((chapter) => chapter.id === targetId);
+      if (from < 0 || to < 0) return list;
+      const next = [...list];
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, moved!);
+      return next;
+    });
+    setOrderDirty(true);
+  }
+
+  async function saveChapterOrder() {
+    if (!book) return;
+    setSavingOrder(true);
+    setMessage("");
+    try {
+      const response = await fetch(`/api/creator/books/${book.id}/chapters/reorder`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chapterIds: visibleIds }),
+      });
+      const data = (await response.json().catch(() => ({}))) as { error?: string };
+      if (!response.ok) {
+        setMessage(data.error ?? "保存顺序失败");
+        return;
+      }
+      setOrderDirty(false);
+      setMessage("章节顺序已保存");
+    } catch {
+      setMessage("网络异常，保存顺序失败");
+    } finally {
+      setSavingOrder(false);
+    }
+  }
+
+  function resetChapterOrder() {
+    setChapterList(chapterRows);
+    setOrderDirty(false);
+  }
+
+  /** 换页会把未保存的改序丢掉（存盘只提交当前页），先问一句。 */
+  function goToChapterPage(page: number) {
+    const next = Math.min(chapterPageCount, Math.max(1, page));
+    if (next === chapterPage) return;
+    if (orderDirty && !window.confirm("当前页的顺序改动还没保存，换页会丢弃。继续？")) return;
+    if (orderDirty) resetChapterOrder();
+    setChapterPage(next);
+  }
+
+  function toggleSelected(chapterId: string) {
+    setSelectedIds((ids) =>
+      ids.includes(chapterId) ? ids.filter((id) => id !== chapterId) : [...ids, chapterId]
+    );
+  }
+
+  function toggleSelectPage() {
+    setSelectedIds((ids) => {
+      if (allOnPageSelected) return ids.filter((id) => !visibleIds.includes(id));
+      return [...new Set([...ids, ...visibleIds])];
+    });
+  }
+
+  function exitSelectMode() {
+    setSelectMode(false);
+    setSelectedIds([]);
+  }
+
+  async function deleteSelectedChapters() {
+    if (!book || selectedIds.length === 0) return;
+    if (!window.confirm(`确定删除选中的 ${selectedIds.length} 章吗？删除后无法恢复。`)) return;
+    setActing(true);
+    setMessage("");
+    try {
+      const response = await fetch(`/api/creator/books/${book.id}/chapters/delete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chapterIds: selectedIds }),
+      });
+      const data = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        deleted?: number;
+      };
+      if (!response.ok) {
+        setMessage(data.error ?? "删除失败");
+        return;
+      }
+      const removed = new Set(selectedIds);
+      setChapterList((list) => list.filter((chapter) => !removed.has(chapter.id)));
+      setSelectedIds([]);
+      setMessage(`已删除 ${data.deleted ?? removed.size} 章`);
+    } catch {
+      setMessage("网络异常，删除失败");
+    } finally {
+      setActing(false);
+    }
+  }
 
   return (
     <div className="mx-auto max-w-3xl space-y-6">
@@ -522,8 +670,52 @@ export default function CreatorBookPage({ loaderData }: Route.ComponentProps) {
       </section>
 
       <section className="rounded-lg border border-border bg-surface p-5">
-        <h2 className="mb-3 text-base font-semibold">章节（{chapterRows.length}）</h2>
-        {chapterRows.length === 0 ? (
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-base font-semibold">章节（{chapterList.length}）</h2>
+          {chapterList.length > 0 && (
+            <div className="flex items-center gap-2">
+              {selectMode ? (
+                <>
+                  <Button size="sm" variant="outline" onClick={toggleSelectPage}>
+                    {allOnPageSelected ? "取消本页" : "全选本页"}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="danger"
+                    disabled={acting || selectedIds.length === 0}
+                    onClick={deleteSelectedChapters}
+                  >
+                    <Trash2 className="size-3.5" />
+                    删除{selectedIds.length > 0 ? ` ${selectedIds.length}` : ""}
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={exitSelectMode}>
+                    <X className="size-3.5" />
+                    退出
+                  </Button>
+                </>
+              ) : (
+                <Button size="sm" variant="outline" onClick={() => setSelectMode(true)}>
+                  批量管理
+                </Button>
+              )}
+            </div>
+          )}
+        </div>
+        {orderDirty && (
+          <div className="mb-3 flex flex-wrap items-center gap-3 rounded-md border border-primary/30 bg-primary/5 p-2.5">
+            <span className="text-xs text-muted-foreground">章节顺序已改动，尚未保存</span>
+            <div className="ml-auto flex items-center gap-2">
+              <Button size="sm" variant="ghost" disabled={savingOrder} onClick={resetChapterOrder}>
+                撤销
+              </Button>
+              <Button size="sm" disabled={savingOrder} onClick={saveChapterOrder}>
+                {savingOrder ? <Loader2 className="size-3.5 animate-spin" /> : null}
+                保存顺序
+              </Button>
+            </div>
+          </div>
+        )}
+        {chapterList.length === 0 ? (
           <EmptyState
             title="还没有章节"
             description="去上传页导入小说生成章节草稿。"
@@ -535,26 +727,89 @@ export default function CreatorBookPage({ loaderData }: Route.ComponentProps) {
           />
         ) : (
           <div className="max-h-96 space-y-1 overflow-y-auto">
-            {visibleChapters.map((chapter) => (
+            {visibleChapters.map((chapter, index) => (
               <div
                 key={chapter.id}
-                className="flex min-w-0 items-center gap-2 rounded-md border border-border bg-background p-2.5"
+                draggable={!selectMode}
+                onDragStart={() => setDragId(chapter.id)}
+                onDragEnd={() => setDragId(null)}
+                onDragOver={(event) => {
+                  if (dragId) event.preventDefault();
+                }}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  dropChapterOn(chapter.id);
+                  setDragId(null);
+                }}
+                className={`flex min-w-0 items-center gap-2 rounded-md border bg-background p-2.5 ${
+                  dragId === chapter.id ? "border-primary opacity-60" : "border-border"
+                }`}
               >
-                <Link
-                  to={`/creator/books/${book.id}/chapters/${chapter.id}`}
-                  className="flex min-w-0 flex-1 items-center gap-3 transition-colors hover:opacity-80"
-                >
-                  <BookOpen className="size-4 shrink-0 text-muted-foreground" />
-                  <span className="min-w-0 flex-1 truncate text-sm">{chapter.title}</span>
-                  {chapter.status === "rejected" && chapter.rejectedReason && (
-                    <span
-                      className="max-w-48 truncate text-xs text-danger"
-                      title={chapter.rejectedReason}
+                {selectMode ? (
+                  <Checkbox
+                    checked={selectedSet.has(chapter.id)}
+                    onCheckedChange={() => toggleSelected(chapter.id)}
+                    aria-label={`选择 ${chapter.title}`}
+                    className="shrink-0"
+                  />
+                ) : (
+                  <span
+                    className="shrink-0 cursor-grab text-muted-foreground active:cursor-grabbing"
+                    aria-hidden="true"
+                  >
+                    <GripVertical className="size-4" />
+                  </span>
+                )}
+                {!selectMode && (
+                  // 触摸端和键盘拖不动，上下按钮是拖动之外的等价入口
+                  <span className="flex shrink-0 flex-col">
+                    <button
+                      type="button"
+                      aria-label={`上移 ${chapter.title}`}
+                      disabled={index === 0}
+                      onClick={() => moveChapter(chapter.id, -1)}
+                      className="text-muted-foreground transition-colors hover:text-foreground disabled:opacity-30"
                     >
-                      {chapter.rejectedReason}
-                    </span>
-                  )}
-                </Link>
+                      <ChevronUp className="size-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={`下移 ${chapter.title}`}
+                      disabled={index === visibleChapters.length - 1}
+                      onClick={() => moveChapter(chapter.id, 1)}
+                      className="text-muted-foreground transition-colors hover:text-foreground disabled:opacity-30"
+                    >
+                      <ChevronDown className="size-3.5" />
+                    </button>
+                  </span>
+                )}
+                {selectMode ? (
+                  <button
+                    type="button"
+                    onClick={() => toggleSelected(chapter.id)}
+                    className="flex min-w-0 flex-1 items-center gap-3 text-left"
+                  >
+                    <BookOpen className="size-4 shrink-0 text-muted-foreground" />
+                    <span className="min-w-0 flex-1 truncate text-sm">{chapter.title}</span>
+                  </button>
+                ) : (
+                  <Link
+                    to={`/creator/books/${book.id}/chapters/${chapter.id}`}
+                    {...openBookLinkProps}
+                    className="flex min-w-0 flex-1 items-center gap-3 transition-colors hover:opacity-80"
+                  >
+                    <BookOpen className="size-4 shrink-0 text-muted-foreground" />
+                    <span className="min-w-0 flex-1 truncate text-sm">{chapter.title}</span>
+                    {chapter.status === "rejected" && chapter.rejectedReason && (
+                      <span
+                        className="max-w-48 truncate text-xs text-danger"
+                        title={chapter.rejectedReason}
+                      >
+                        {chapter.rejectedReason}
+                      </span>
+                    )}
+                  </Link>
+                )}
                 <Badge
                   variant={
                     chapter.status === "published"
@@ -568,19 +823,20 @@ export default function CreatorBookPage({ loaderData }: Route.ComponentProps) {
                 >
                   {chapterStatusText[chapter.status] ?? chapter.status}
                 </Badge>
-                {((directPublish &&
-                  ["draft", "rejected", "pending_review"].includes(chapter.status)) ||
-                  (!directPublish && ["draft", "rejected"].includes(chapter.status))) && (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={acting}
-                    onClick={() => submitChapter(chapter.id)}
-                  >
-                    <Send className="size-3.5" />
-                    {directPublish ? "直接发布" : "提交审核"}
-                  </Button>
-                )}
+                {!selectMode &&
+                  ((directPublish &&
+                    ["draft", "rejected", "pending_review"].includes(chapter.status)) ||
+                    (!directPublish && ["draft", "rejected"].includes(chapter.status))) && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={acting}
+                      onClick={() => submitChapter(chapter.id)}
+                    >
+                      <Send className="size-3.5" />
+                      {directPublish ? "直接发布" : "提交审核"}
+                    </Button>
+                  )}
               </div>
             ))}
             {chapterPageCount > 1 && (
@@ -589,7 +845,7 @@ export default function CreatorBookPage({ loaderData }: Route.ComponentProps) {
                   size="sm"
                   variant="outline"
                   disabled={chapterPage <= 1}
-                  onClick={() => setChapterPage((page) => Math.max(1, page - 1))}
+                  onClick={() => goToChapterPage(chapterPage - 1)}
                 >
                   上一页
                 </Button>
@@ -600,7 +856,7 @@ export default function CreatorBookPage({ loaderData }: Route.ComponentProps) {
                   size="sm"
                   variant="outline"
                   disabled={chapterPage >= chapterPageCount}
-                  onClick={() => setChapterPage((page) => Math.min(chapterPageCount, page + 1))}
+                  onClick={() => goToChapterPage(chapterPage + 1)}
                 >
                   下一页
                 </Button>

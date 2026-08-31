@@ -10,6 +10,7 @@ import { createAuth } from "~/server/auth";
 import { books } from "drizzle/schema";
 import { desc, eq } from "drizzle-orm";
 import { ensureAuthorProfile } from "~/server/creator/profile";
+import { openBookLinkProps } from "~/lib/open-book";
 import { pageMeta, pageTitle } from "~/lib/page-title";
 
 export function meta() {
@@ -128,6 +129,7 @@ export default function CreatorPage({ loaderData }: Route.ComponentProps) {
               <Link
                 key={book.id}
                 to={`/creator/books/${book.id}`}
+                {...openBookLinkProps}
                 className="flex min-w-0 items-center gap-3 rounded-lg border border-border bg-surface p-3 transition-colors hover:bg-muted"
               >
                 <span className="flex size-10 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">

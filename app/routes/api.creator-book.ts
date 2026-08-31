@@ -8,7 +8,9 @@ import { ensureAuthorProfile } from "~/server/creator/profile";
 import { listEnabledCategories } from "~/server/repositories/categories";
 import {
   deleteBookPermanently,
+  deleteChaptersBatch,
   publishAllChaptersDirectly,
+  reorderChapters,
   submitAllChaptersForReview,
   toggleBookPublication,
   updateBookMetadata,
@@ -61,11 +63,17 @@ export async function action({ request, context, params }: Route.ActionArgs) {
   const isPublishAll = request.method === "POST" && url.pathname.endsWith("/publish-all");
   const isTogglePublication =
     request.method === "POST" && url.pathname.endsWith("/toggle-publication");
+  const isReorderChapters =
+    request.method === "POST" && url.pathname.endsWith("/chapters/reorder");
+  const isDeleteChapters =
+    request.method === "POST" && url.pathname.endsWith("/chapters/delete");
   const isDelete = request.method === "DELETE";
   if (
     !isSubmitAll &&
     !isPublishAll &&
     !isTogglePublication &&
+    !isReorderChapters &&
+    !isDeleteChapters &&
     !isDelete &&
     request.method !== "PUT"
   ) {
@@ -95,6 +103,32 @@ export async function action({ request, context, params }: Route.ActionArgs) {
 
   if (isTogglePublication) {
     const result = await toggleBookPublication(db, book.id, user.id);
+    return Response.json({ ok: true, ...result });
+  }
+
+  if (isReorderChapters) {
+    const body = (await request.json().catch(() => ({}))) as { chapterIds?: unknown };
+    const chapterIds = Array.isArray(body.chapterIds)
+      ? body.chapterIds.filter((id): id is string => typeof id === "string")
+      : [];
+    if (chapterIds.length === 0) {
+      return Response.json({ error: "缺少章节列表" }, { status: 400 });
+    }
+    const result = await reorderChapters(db, book.id, chapterIds, user.id);
+    if (!result) return Response.json({ error: "章节列表已过期，请刷新" }, { status: 409 });
+    return Response.json({ ok: true, ...result });
+  }
+
+  if (isDeleteChapters) {
+    const body = (await request.json().catch(() => ({}))) as { chapterIds?: unknown };
+    const chapterIds = Array.isArray(body.chapterIds)
+      ? body.chapterIds.filter((id): id is string => typeof id === "string")
+      : [];
+    if (chapterIds.length === 0) {
+      return Response.json({ error: "没有选中章节" }, { status: 400 });
+    }
+    const result = await deleteChaptersBatch(db, book.id, chapterIds, user.id);
+    if (!result) return Response.json({ error: "not found" }, { status: 404 });
     return Response.json({ ok: true, ...result });
   }
 

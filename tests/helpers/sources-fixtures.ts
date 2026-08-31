@@ -87,6 +87,10 @@ export function createSourceFixtures(raw: DatabaseSync) {
       verified_at INTEGER,
       verify_search_hits INTEGER NOT NULL DEFAULT 0,
       verify_toc_chapters INTEGER NOT NULL DEFAULT 0,
+      explore_status TEXT NOT NULL DEFAULT 'untested',
+      explore_books INTEGER NOT NULL DEFAULT 0,
+      explore_message TEXT,
+      explore_checked_at INTEGER,
       created_by TEXT,
       created_at INTEGER NOT NULL DEFAULT ${now},
       updated_at INTEGER NOT NULL DEFAULT ${now}

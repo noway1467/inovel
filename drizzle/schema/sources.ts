@@ -92,6 +92,15 @@ export const contentSources = sqliteTable(
     verifiedAt: integer("verified_at", { mode: "timestamp_ms" }),
     verifySearchHits: integer("verify_search_hits").notNull().default(0),
     verifyTocChapters: integer("verify_toc_chapters").notNull().default(0),
+    /**
+     * 分类浏览实测。「有分类规则」和「分类页真能抓到书」是两回事：
+     * 规则在、页面改版了，点进去就是一片空白。跑一遍第一个分类记下抓到几本，
+     * 管理台据此清理"有分类但抓不到书"的源。取值 untested / ok / empty / failed。
+     */
+    exploreStatus: text("explore_status").notNull().default("untested"),
+    exploreBooks: integer("explore_books").notNull().default(0),
+    exploreMessage: text("explore_message"),
+    exploreCheckedAt: integer("explore_checked_at", { mode: "timestamp_ms" }),
     createdBy: text("created_by").references(() => users.id),
     createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().defaultNow(),
     updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().defaultNow(),
@@ -105,6 +114,7 @@ export const contentSources = sqliteTable(
       table.searchWeight
     ),
     index("content_sources_verify_idx").on(table.verifyStatus),
+    index("content_sources_explore_idx").on(table.exploreStatus),
   ]
 );
 

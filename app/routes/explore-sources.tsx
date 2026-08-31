@@ -100,6 +100,7 @@ export default function ExploreSourcesPage({ loaderData }: Route.ComponentProps)
               <li key={source.id}>
                 <Link
                   to={`/explore?source=${encodeURIComponent(source.id)}`}
+                  {...openBookLinkProps}
                   className="flex items-center justify-between gap-3 rounded-lg border border-border bg-surface px-4 py-3 hover:bg-muted"
                 >
                   <span className="min-w-0">

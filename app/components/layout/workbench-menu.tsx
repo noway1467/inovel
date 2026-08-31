@@ -38,10 +38,10 @@ export function WorkbenchMenu({ isAuthor, isAdmin, compact = false }: WorkbenchM
       <DropdownMenuTrigger asChild>
         <Button
           type="button"
-          variant="secondary"
+          variant="ghost"
           size={compact ? "icon-sm" : "sm"}
           aria-label="工作台"
-          className={compact ? "rounded-full" : "rounded-lg border border-primary/10 px-3"}
+          className={compact ? "rounded-full" : "rounded-lg px-3"}
         >
           <BriefcaseBusiness className="size-4" />
           {!compact && (
