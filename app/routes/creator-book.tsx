@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router";
 import {
+  AlertTriangle,
   BookOpen,
+  CheckCircle2,
   ChevronDown,
   ChevronLeft,
   ChevronUp,
@@ -140,7 +142,11 @@ export default function CreatorBookPage({ loaderData }: Route.ComponentProps) {
   const [tagsText, setTagsText] = useState(currentTags.join("，"));
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
+  // 成功和失败原来都是一行灰字，看不出发布到底成了没有，分开配色
+  const [messageOk, setMessageOk] = useState(false);
   const [acting, setActing] = useState(false);
+  // 发布成功后要留一眼提示再跳走，这期间按钮不能再点
+  const [leaving, setLeaving] = useState(false);
   const directPublishStorageKey = loaderData.user
     ? `creator-book-direct-publish:${loaderData.user.id}`
     : "";
@@ -176,6 +182,21 @@ export default function CreatorBookPage({ loaderData }: Route.ComponentProps) {
     }
   }
 
+  function notifyOk(text: string) {
+    setMessage(text);
+    setMessageOk(true);
+  }
+
+  function notifyFail(text: string) {
+    setMessage(text);
+    setMessageOk(false);
+  }
+
+  function clearMessage() {
+    setMessage("");
+    setMessageOk(false);
+  }
+
   if (!loaderData.user) {
     return (
       <div className="mx-auto max-w-md">
@@ -209,7 +230,7 @@ export default function CreatorBookPage({ loaderData }: Route.ComponentProps) {
   async function saveBook(): Promise<boolean> {
     if (!book) return false;
     setSaving(true);
-    setMessage("");
+    clearMessage();
     try {
       const response = await fetch(`/api/creator/books/${book.id}`, {
         method: "PUT",
@@ -229,69 +250,109 @@ export default function CreatorBookPage({ loaderData }: Route.ComponentProps) {
       });
       const data = (await response.json()) as { error?: string };
       if (!response.ok) {
-        setMessage(data.error ?? "保存失败");
+        notifyFail(data.error ?? "保存失败");
         return false;
       }
-      setMessage("已保存");
+      notifyOk("已保存");
       return true;
     } catch {
-      setMessage("网络异常，保存失败");
+      notifyFail("网络异常，保存失败");
       return false;
     } finally {
       setSaving(false);
     }
   }
 
-  async function submitAll() {
+  /** 提示留一眼再回列表，回去用整页跳转，作品状态一定是新的。 */
+  function returnToCreator() {
+    setLeaving(true);
+    window.setTimeout(() => window.location.assign("/creator"), 900);
+  }
+
+  /**
+   * 存作品信息 + 走发布/提交。
+   *
+   * `backToList` 是给底部「保存并发布」用的：那颗按钮是一趟活儿的收尾，做完
+   * 报个结果就回作品管理，列表上的状态徽标即是回执。顶部那颗留在原地刷新，
+   * 因为它常和下面的章节操作连着按，跳走反而打断。
+   */
+  async function submitAll(backToList = false) {
     if (!book) return;
     setActing(true);
-    setMessage("");
+    clearMessage();
+    let redirecting = false;
     try {
       const saved = await saveBook();
       if (!saved) return;
       const endpoint = directPublish ? "publish-all" : "submit-all";
       const response = await fetch(`/api/creator/books/${book.id}/${endpoint}`, { method: "POST" });
-      const data = (await response.json()) as {
+      const data = (await response.json().catch(() => ({}))) as {
         error?: string;
         submitted?: number;
         published?: number;
       };
       if (!response.ok) {
-        setMessage(
+        notifyFail(
           `作品信息已保存；${data.error ?? (directPublish ? "直接发布失败" : "提交失败")}`
         );
         return;
       }
-      const count = directPublish ? data.published ?? 0 : data.submitted ?? 0;
+      const count = directPublish ? (data.published ?? 0) : (data.submitted ?? 0);
       if (count === 0) {
-        setMessage(
-          directPublish ? "没有需要直接发布的章节，作品信息已保存" : "没有需要提交审核的章节，作品信息已保存"
+        // 没章节可发也是成功路径：信息确实存进去了，别用失败配色吓人
+        notifyOk(
+          backToList
+            ? directPublish
+              ? "作品信息已保存，没有需要发布的章节，正在返回作品管理…"
+              : "作品信息已保存，没有需要提交的章节，正在返回作品管理…"
+            : directPublish
+              ? "没有需要直接发布的章节，作品信息已保存"
+              : "没有需要提交审核的章节，作品信息已保存"
         );
+        if (backToList) {
+          redirecting = true;
+          returnToCreator();
+        }
         return;
       }
-      setMessage(directPublish ? "已直接发布并更新作品状态" : "已提交审核，刷新列表中…");
+      if (backToList) {
+        notifyOk(
+          directPublish
+            ? `发布成功，已上线 ${count} 章，正在返回作品管理…`
+            : `已提交审核 ${count} 章，正在返回作品管理…`
+        );
+        redirecting = true;
+        returnToCreator();
+        return;
+      }
+      notifyOk(
+        directPublish ? `发布成功，已上线 ${count} 章，刷新中…` : `已提交审核 ${count} 章，刷新中…`
+      );
+      redirecting = true;
       window.location.reload();
     } finally {
-      setActing(false);
+      if (!redirecting) setActing(false);
     }
   }
 
   async function submitChapter(chapterId: string) {
     setActing(true);
-    setMessage("");
+    clearMessage();
+    let redirecting = false;
     try {
       const endpoint = directPublish ? "publish" : "submit";
       const response = await fetch(`/api/creator/chapters/${chapterId}/${endpoint}`, {
         method: "POST",
       });
-      const data = (await response.json()) as { error?: string };
+      const data = (await response.json().catch(() => ({}))) as { error?: string };
       if (!response.ok) {
-        setMessage(data.error ?? "提交失败");
+        notifyFail(data.error ?? "提交失败");
         return;
       }
+      redirecting = true;
       window.location.reload();
     } finally {
-      setActing(false);
+      if (!redirecting) setActing(false);
     }
   }
 
@@ -318,13 +379,14 @@ export default function CreatorBookPage({ loaderData }: Route.ComponentProps) {
     if (!book) return;
     if (!window.confirm(`确定删除《${book.title}》吗？删除后公开页面不可见。`)) return;
     setActing(true);
-    setMessage("");
+    clearMessage();
+    let redirecting = false;
     try {
       let response: Response;
       try {
         response = await fetch(`/api/creator/books/${book.id}`, { method: "DELETE" });
       } catch (error) {
-        setMessage(error instanceof Error ? `删除失败：${error.message}` : "删除失败，请稍后重试");
+        notifyFail(error instanceof Error ? `删除失败：${error.message}` : "删除失败，请稍后重试");
         return;
       }
       let data: { error?: string } = {};
@@ -334,31 +396,34 @@ export default function CreatorBookPage({ loaderData }: Route.ComponentProps) {
         data = {};
       }
       if (!response.ok) {
-        setMessage(data.error ?? "删除失败，请稍后重试");
+        notifyFail(data.error ?? "删除失败，请稍后重试");
         return;
       }
+      redirecting = true;
       window.location.assign("/creator");
     } finally {
-      setActing(false);
+      if (!redirecting) setActing(false);
     }
   }
 
   async function togglePublication() {
     if (!book) return;
     setActing(true);
-    setMessage("");
+    clearMessage();
+    let redirecting = false;
     try {
       const response = await fetch(`/api/creator/books/${book.id}/toggle-publication`, {
         method: "POST",
       });
-      const data = (await response.json()) as { error?: string };
+      const data = (await response.json().catch(() => ({}))) as { error?: string };
       if (!response.ok) {
-        setMessage(data.error ?? "操作失败");
+        notifyFail(data.error ?? "操作失败");
         return;
       }
+      redirecting = true;
       window.location.reload();
     } finally {
-      setActing(false);
+      if (!redirecting) setActing(false);
     }
   }
 
@@ -404,7 +469,7 @@ export default function CreatorBookPage({ loaderData }: Route.ComponentProps) {
   async function saveChapterOrder() {
     if (!book) return;
     setSavingOrder(true);
-    setMessage("");
+    clearMessage();
     try {
       const response = await fetch(`/api/creator/books/${book.id}/chapters/reorder`, {
         method: "POST",
@@ -413,13 +478,13 @@ export default function CreatorBookPage({ loaderData }: Route.ComponentProps) {
       });
       const data = (await response.json().catch(() => ({}))) as { error?: string };
       if (!response.ok) {
-        setMessage(data.error ?? "保存顺序失败");
+        notifyFail(data.error ?? "保存顺序失败");
         return;
       }
       setOrderDirty(false);
-      setMessage("章节顺序已保存");
+      notifyOk("章节顺序已保存");
     } catch {
-      setMessage("网络异常，保存顺序失败");
+      notifyFail("网络异常，保存顺序失败");
     } finally {
       setSavingOrder(false);
     }
@@ -461,7 +526,7 @@ export default function CreatorBookPage({ loaderData }: Route.ComponentProps) {
     if (!book || selectedIds.length === 0) return;
     if (!window.confirm(`确定删除选中的 ${selectedIds.length} 章吗？删除后无法恢复。`)) return;
     setActing(true);
-    setMessage("");
+    clearMessage();
     try {
       const response = await fetch(`/api/creator/books/${book.id}/chapters/delete`, {
         method: "POST",
@@ -473,15 +538,15 @@ export default function CreatorBookPage({ loaderData }: Route.ComponentProps) {
         deleted?: number;
       };
       if (!response.ok) {
-        setMessage(data.error ?? "删除失败");
+        notifyFail(data.error ?? "删除失败");
         return;
       }
       const removed = new Set(selectedIds);
       setChapterList((list) => list.filter((chapter) => !removed.has(chapter.id)));
       setSelectedIds([]);
-      setMessage(`已删除 ${data.deleted ?? removed.size} 章`);
+      notifyOk(`已删除 ${data.deleted ?? removed.size} 章`);
     } catch {
-      setMessage("网络异常，删除失败");
+      notifyFail("网络异常，删除失败");
     } finally {
       setActing(false);
     }
@@ -514,14 +579,19 @@ export default function CreatorBookPage({ loaderData }: Route.ComponentProps) {
           </Link>
         </Button>
         <div className="flex flex-wrap gap-2">
-          <Button size="sm" variant="outline" disabled={acting} onClick={togglePublication}>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={acting || leaving}
+            onClick={togglePublication}
+          >
             {book.status === "suspended" ? "重新上架" : "下架作品"}
           </Button>
-          <Button size="sm" onClick={submitAll} disabled={acting}>
+          <Button size="sm" onClick={() => submitAll()} disabled={acting || leaving}>
             {acting ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
             {directPublish ? "全部直接发布" : "全部提交审核"}
           </Button>
-          <Button size="sm" variant="danger" onClick={deleteBook} disabled={acting}>
+          <Button size="sm" variant="danger" onClick={deleteBook} disabled={acting || leaving}>
             <Trash2 className="size-4" />
             删除作品
           </Button>
@@ -655,16 +725,36 @@ export default function CreatorBookPage({ loaderData }: Route.ComponentProps) {
               onCheckedChange={updateDirectPublish}
             />
           </div>
-          <div className="flex flex-wrap items-center gap-3">
-            <Button onClick={submitAll} disabled={saving || acting}>
-              {saving || acting ? (
-                <Loader2 className="size-4 animate-spin" />
-              ) : (
-                <Save className="size-4" />
-              )}
-              {saving || acting ? "保存并发布中…" : "保存并发布"}
-            </Button>
-            {message && <p className="text-sm text-muted-foreground">{message}</p>}
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center gap-3">
+              <Button onClick={() => submitAll(true)} disabled={saving || acting || leaving}>
+                {saving || acting || leaving ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <Save className="size-4" />
+                )}
+                {leaving ? "返回作品管理…" : saving || acting ? "保存并发布中…" : "保存并发布"}
+              </Button>
+              <Button variant="ghost" asChild>
+                <Link to="/creator">返回作品管理</Link>
+              </Button>
+            </div>
+            {message && (
+              <p
+                role="status"
+                aria-live="polite"
+                className={`flex items-start gap-2 rounded-md px-3 py-2 text-sm ${
+                  messageOk ? "bg-success/10 text-success" : "bg-danger/10 text-danger"
+                }`}
+              >
+                {messageOk ? (
+                  <CheckCircle2 className="mt-0.5 size-4 shrink-0" />
+                ) : (
+                  <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+                )}
+                {message}
+              </p>
+            )}
           </div>
         </div>
       </section>
