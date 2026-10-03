@@ -3,6 +3,7 @@ import {
   evalJsonPath,
   isJsonPath,
   jsonValueToText,
+  parseJsonPath,
   type JsonValue,
 } from "~/server/sources/json-path";
 import { textNodeName, textOf, type XmlNode } from "~/server/sources/xml";
@@ -50,6 +51,8 @@ export interface SingleRule {
   target: ExtractTarget;
   /** 非空时走 JSONPath 分支 */
   jsonPath: string | null;
+  /** JSON 响应允许相对字段路径；显式 CSS 规则不参与这条回退。 */
+  implicitJsonPath?: string;
   /** !n 排除的下标，负数表示从后计 */
   excludeIndexes: number[];
 }
@@ -190,15 +193,18 @@ function parseSingle(input: string): SingleRule {
   if (!trimmed) throw new UnsupportedRuleError("规则分支为空");
 
   // JSONPath 分支：整段就是路径，可选 @text 之类的尾巴无意义，直接用路径
-  if (isJsonPath(trimmed)) {
-    return { selector: "", target: { kind: "text" }, jsonPath: trimmed, excludeIndexes: [] };
+  if (isJsonPath(trimmed) || /^@json:/i.test(trimmed)) {
+    const path = trimmed.replace(/^@json:/i, "").trim();
+    const jsonPath = isJsonPath(path) ? path : path.startsWith("[") ? `$${path}` : `$.${path}`;
+    parseJsonPath(jsonPath);
+    return { selector: "", target: { kind: "text" }, jsonPath, excludeIndexes: [] };
   }
 
   const { body: withoutExcludes, excludes } = parseExclusions(trimmed);
 
   let working = withoutExcludes.trim();
   let explicitCss = false;
-  if (working.startsWith("@css:")) {
+  if (/^@css:/i.test(working)) {
     working = working.slice(5).trim();
     explicitCss = true;
   }
@@ -224,7 +230,23 @@ function parseSingle(input: string): SingleRule {
     ? segments.join(" ")
     : segments.map(segmentToCss).filter(Boolean).join(" ");
 
-  return { selector, target, jsonPath: null, excludeIndexes: excludes };
+  let implicitJsonPath: string | undefined;
+  if (!explicitCss && !trimmed.includes("@")) {
+    const path = trimmed.startsWith("[") ? `$${trimmed}` : `$.${trimmed}`;
+    try {
+      parseJsonPath(path);
+      implicitJsonPath = path;
+    } catch {
+      // HTML 方言不参与 JSON 回退。
+    }
+  }
+  return {
+    selector,
+    target,
+    jsonPath: null,
+    excludeIndexes: excludes,
+    ...(implicitJsonPath ? { implicitJsonPath } : {}),
+  };
 }
 
 /**
@@ -350,9 +372,10 @@ function applyExclusions<T>(items: T[], excludes: number[]): T[] {
 
 /** 求出一个分支命中的节点（HTML）或值（JSON） */
 function evalBranchNodes(doc: RuleDoc, rule: SingleRule): RuleDoc[] {
-  if (rule.jsonPath) {
+  const jsonPath = rule.jsonPath ?? (doc.kind === "json" ? rule.implicitJsonPath : null);
+  if (jsonPath) {
     if (doc.kind !== "json") return [];
-    const values = applyExclusions(evalJsonPath(doc.value, rule.jsonPath), rule.excludeIndexes);
+    const values = applyExclusions(evalJsonPath(doc.value, jsonPath), rule.excludeIndexes);
     return values.map((value) => jsonDoc(value));
   }
   if (doc.kind !== "html") return [];

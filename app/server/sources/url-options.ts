@@ -26,6 +26,8 @@
  * 然后抓回一堆 404。
  */
 
+import JSON5 from "json5";
+
 export interface RequestOptions {
   method: "GET" | "POST";
   body?: string;
@@ -60,57 +62,48 @@ export function splitUrlAndOptions(raw: string): { url: string; optionsText: str
  * 解析选项对象。
  *
  * 真实书源里这段常常不是严格 JSON：body 的值用单引号包着
- * （`"body": '{"chapterId":123}'`），JSON.parse 直接报错。所以先按严格 JSON 试，
- * 失败再退回逐字段正则取值 —— 只取我们用得上的四个字段。
+ * （`"body": '{"chapterId":123}'`），还可能有未加引号的键与尾逗号。
+ * 用数据解析器处理，不执行脚本；模板正则里未按 JSON 转义的反斜杠要保留。
  */
 export function parseRequestOptions(optionsText: string | null): RequestOptions {
   const fallback: RequestOptions = { method: "GET" };
   if (!optionsText) return fallback;
-
+  // JSON5 仅解析数据；单引号、未加引号的键与尾逗号无需执行第三方脚本。
+  // 旧书源会把 /\d+/ 直接放进字符串；JSON5 会将 \d 当成 d，不能破坏后续模板求值。
+  const escaped = optionsText.replace(/\\([\s\S])/g, (all, char: string) =>
+    /^[\\'"/bfnrtuvx0\r\n]$/.test(char) ? all : `\\${all}`
+  );
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(optionsText) as Record<string, unknown>;
-    return normalizeOptions(parsed);
+    parsed = JSON.parse(escaped);
   } catch {
-    // 单引号 body 之类的非严格 JSON：逐字段取
-    const pick = (key: string): string | undefined => {
-      const match = new RegExp(`["']${key}["']\\s*:\\s*(["'])([\\s\\S]*?)\\1`, "i").exec(optionsText);
-      return match?.[2];
-    };
-    const method = pick("method")?.toUpperCase() === "POST" ? "POST" : "GET";
-    const body = pick("body");
-    const charset = pick("charset");
-
-    // headers 是个嵌套对象，单独抓出来再按键值扫
-    const headersText = /["']headers["']\s*:\s*\{([\s\S]*?)\}/i.exec(optionsText)?.[1];
-    const headers: Record<string, string> = {};
-    if (headersText) {
-      const pattern = /["']([^"']+)["']\s*:\s*["']([\s\S]*?)["']/g;
-      let match: RegExpExecArray | null;
-      while ((match = pattern.exec(headersText)) !== null) {
-        if (match[1] && match[2] !== undefined) headers[match[1]] = match[2];
-      }
-    }
-
-    return {
-      method,
-      ...(body ? { body } : {}),
-      ...(Object.keys(headers).length > 0 ? { headers } : {}),
-      ...(charset ? { charset } : {}),
-    };
+    parsed = JSON5.parse(escaped);
   }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("请求选项必须是对象");
+  }
+  return normalizeOptions(parsed as Record<string, unknown>);
 }
 
 function normalizeOptions(parsed: Record<string, unknown>): RequestOptions {
-  const method = String(parsed.method ?? "GET").toUpperCase() === "POST" ? "POST" : "GET";
+  const method = String(parsed.method ?? "GET").trim().toUpperCase();
+  if (method !== "GET" && method !== "POST") throw new Error(`不支持请求方式：${method}`);
+  if (parsed.webView === true || parsed.webView === "true" || parsed.js || parsed.webJs) {
+    throw new Error("请求需要 WebView 或脚本执行，暂不支持");
+  }
   const headers: Record<string, string> = {};
-  if (parsed.headers && typeof parsed.headers === "object") {
-    for (const [key, value] of Object.entries(parsed.headers as Record<string, unknown>)) {
+  const rawHeaders: unknown =
+    typeof parsed.headers === "string" ? JSON5.parse(parsed.headers) : parsed.headers;
+  if (rawHeaders && typeof rawHeaders === "object" && !Array.isArray(rawHeaders)) {
+    for (const [key, value] of Object.entries(rawHeaders as Record<string, unknown>)) {
       if (typeof value === "string") headers[key] = value;
     }
   }
   return {
     method,
-    ...(typeof parsed.body === "string" ? { body: parsed.body } : {}),
+    ...(parsed.body !== undefined
+      ? { body: typeof parsed.body === "string" ? parsed.body : JSON.stringify(parsed.body) }
+      : {}),
     ...(Object.keys(headers).length > 0 ? { headers } : {}),
     ...(typeof parsed.charset === "string" ? { charset: parsed.charset } : {}),
   };

@@ -1,5 +1,6 @@
 import { parseSourceUrl } from "~/server/sources/fetch-guard";
 import type { AppDb } from "~/server/db";
+import JSON5 from "json5";
 
 /**
  * 拉取书源/订阅源清单文件。
@@ -105,7 +106,11 @@ export type ListFormat = "bookSource" | "rssSource" | "unknown";
 export function detectListFormat(text: string): ListFormat {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(text);
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = JSON5.parse(text);
+    }
   } catch {
     return "unknown";
   }

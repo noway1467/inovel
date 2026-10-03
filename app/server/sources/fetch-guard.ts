@@ -146,9 +146,13 @@ export interface GuardedFetchInit {
   headers?: Record<string, string>;
   method?: "GET" | "POST";
   body?: string;
+  /** 书源显式指定响应编码时优先使用；未配置仍按响应头/meta 嗅探。 */
+  charset?: string;
 }
 
 export interface GuardedFetchResult {
+  /** 已经过重定向安全校验的最终地址，用于补全搜索结果相对链接。 */
+  url?: string;
   status: number;
   body: string;
   contentType: string;
@@ -265,7 +269,9 @@ async function guardedFetchOnce(
 ): Promise<{ ok: true; result: GuardedFetchResult } | FetchRejection | { ok: false; code: "FETCH_FAILED"; message: string }> {
   const check = await checkSourceUrl(db, raw);
   if (!check.ok) return check;
-  const headers = init?.headers ?? {};
+  const headers = Object.fromEntries(
+    Object.entries(init?.headers ?? {}).map(([key, value]) => [key.toLowerCase(), value])
+  );
   const hasUserAgent = Object.keys(headers).some((key) => key.toLowerCase() === "user-agent");
 
   const controller = new AbortController();
@@ -277,29 +283,30 @@ async function guardedFetchOnce(
       redirect: "follow",
       signal: controller.signal,
       headers: {
-        ...(hasUserAgent ? {} : { "User-Agent": userAgent }),
-        Accept: "*/*",
+        ...(hasUserAgent ? {} : { "user-agent": userAgent }),
+        accept: "*/*",
         /**
          * POST 默认按表单编码：书源里的 body 绝大多数是 `bid=65688` 这种
          * 表单串。写成 JSON 的源会自己在 headers 里覆盖 Content-Type。
          */
         ...(method === "POST" && init?.body
-          ? { "Content-Type": "application/x-www-form-urlencoded" }
+          ? { "content-type": "application/x-www-form-urlencoded" }
           : {}),
-        ...init?.headers,
+        ...headers,
       },
       ...(method === "POST" && init?.body !== undefined ? { body: init.body } : {}),
     });
 
     // 跟随重定向后的落点也必须在白名单内，否则等于绕过授权
-    const finalCheck = await checkSourceUrl(db, response.url || check.url.toString());
+    const finalUrl = response.url || check.url.toString();
+    const finalCheck = await checkSourceUrl(db, finalUrl);
     if (!finalCheck.ok) return finalCheck;
 
     const reader = response.body?.getReader();
     if (!reader) {
       return {
         ok: true,
-        result: { status: response.status, body: "", contentType: response.headers.get("content-type") ?? "", truncated: false },
+        result: { url: finalUrl, status: response.status, body: "", contentType: response.headers.get("content-type") ?? "", truncated: false },
       };
     }
     const chunks: Uint8Array[] = [];
@@ -328,7 +335,8 @@ async function guardedFetchOnce(
       ok: true,
       result: {
         status: response.status,
-        body: decodeBody(merged, contentType),
+        url: finalUrl,
+        body: decodeBody(merged, contentType, init?.charset),
         contentType,
         truncated,
         retryAfter: response.headers.get("retry-after"),
@@ -419,8 +427,12 @@ export function pickCookiePairs(setCookie: string | null): string | null {
 }
 
 /** 按嗅探到的编码解码；Workers 不认某个编码时退回 utf-8，不让整次抓取失败 */
-export function decodeBody(bytes: Uint8Array, contentType: string): string {
-  const charset = detectCharset(bytes, contentType);
+export function decodeBody(
+  bytes: Uint8Array,
+  contentType: string,
+  configuredCharset?: string
+): string {
+  const charset = normalizeCharset(configuredCharset) ?? detectCharset(bytes, contentType);
   try {
     return new TextDecoder(charset, { fatal: false }).decode(bytes);
   } catch {

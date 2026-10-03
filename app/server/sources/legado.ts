@@ -1,15 +1,18 @@
 import { UnsupportedRuleError, parseRule, stripListPrefix } from "~/server/sources/rule-expr";
 import { splitUrlAndOptions, templateIsSupported } from "~/server/sources/url-options";
 import { isSupportedAjaxRule } from "~/server/sources/java-ajax";
+import JSON5 from "json5";
+import { renderSearchUrl, supportsSearchRequest } from "~/server/sources/search-request";
 
 /**
  * v3: JSON 目录数组展开、目录/正文分页兜底、POST 目录选项、
  *     扁平格式、净化规则、java.ajax 与全局 header。
  * v4: 正文规则不可译时改走通用探测（contentMode）、清洗段里的
  *     `{{}}`/`<js>` 不再拖垮整条规则。
+ * v5: 搜索 POST/JSON/编码选项、静态模板与 JSON 字段规则，保留搜索封面和简介。
  * 修改转换器能力时递增，让老配置能在重新导入时升级。
  */
-export const currentConverterVersion = 4;
+export const currentConverterVersion = 5;
 
 /**
  * 开源阅读（Legado）书源 JSON → 内部规则配置。
@@ -34,6 +37,8 @@ export interface RulesConfig {
   searchName?: string | null;
   searchAuthor?: string | null;
   searchBookUrl?: string | null;
+  searchCover?: string | null;
+  searchIntro?: string | null;
   /** 详情页规则 */
   infoName?: string | null;
   infoAuthor?: string | null;
@@ -107,6 +112,8 @@ interface LegadoSearchRule {
   name?: string;
   author?: string;
   bookUrl?: string;
+  coverUrl?: string;
+  intro?: string;
 }
 
 interface LegadoInfoRule {
@@ -168,6 +175,8 @@ interface LegadoFlatSource {
   ruleSearchName?: string;
   ruleSearchAuthor?: string;
   ruleSearchNoteUrl?: string;
+  ruleSearchCoverUrl?: string;
+  ruleSearchIntroduce?: string;
   ruleBookName?: string;
   ruleBookAuthor?: string;
   ruleIntroduce?: string;
@@ -220,6 +229,8 @@ export function normalizeFlatSource(raw: LegadoBookSource & LegadoFlatSource): v
   fillMissing(search, "name", clean(raw.ruleSearchName));
   fillMissing(search, "author", clean(raw.ruleSearchAuthor));
   fillMissing(search, "bookUrl", clean(raw.ruleSearchNoteUrl));
+  fillMissing(search, "coverUrl", clean(raw.ruleSearchCoverUrl));
+  fillMissing(search, "intro", clean(raw.ruleSearchIntroduce));
 
   const info = (raw.ruleBookInfo ??= {});
   fillMissing(info, "name", clean(raw.ruleBookName));
@@ -276,7 +287,7 @@ function parseHeaderMap(value: unknown): Record<string, string> | null {
     const text = value.trim();
     if (!text) return null;
     try {
-      return parseHeaderMap(JSON.parse(text));
+      return parseHeaderMap(JSON5.parse(text));
     } catch {
       const header = /["']?User-Agent["']?\s*:\s*(["'])([\s\S]*?)\1/i.exec(text);
       return header?.[2] ? { "user-agent": header[2] } : null;
@@ -304,15 +315,9 @@ export function needsJsEvaluation(template: string): boolean {
   if (/^@js:/i.test(trimmed) || trimmed.includes("<js>")) return true;
   if (/^(var|let|const|function)\s/.test(trimmed)) return true;
   // 出现 Legado 注入的宿主对象，说明要执行脚本
-  if (/\b(java|source|cookie|cache|result)\s*\./.test(trimmed)) return true;
-
-  const placeholders = trimmed.match(/\{\{[\s\S]*?\}\}/g);
-  if (!placeholders) return false;
-  // 纯占位（{{key}}）是文本替换，可以直接用；带表达式的则需要求值
-  return placeholders.some((raw) => {
-    const body = raw.slice(2, -2).trim();
-    return !/^(key|searchKey|page)$/i.test(body);
-  });
+  const outsideTemplates = trimmed.replace(/\{\{[\s\S]*?\}\}/g, "");
+  if (/\b(java|source|cookie|cache|result)\s*\./.test(outsideTemplates)) return true;
+  return !supportsSearchRequest(template);
 }
 
 /**
@@ -390,13 +395,13 @@ function isUrlTemplate(raw: string): boolean {
  * 后者是目录走接口的源（POST + body），此前被当成"需要 JS"丢掉，结果整个源
  * 退化成从详情页刮最新几章。这里只要表达式全都能求值就留下原文。
  */
-function resolveTocUrlRule(raw: string | null, warnings: string[]): string | null {
+function resolveTocUrlRule(raw: string | null, warnings: string[], label = "详情目录地址"): string | null {
   if (!raw) return null;
   const { url } = splitUrlAndOptions(raw);
   // 带 {{}} 的才需要判；普通选择器照旧走 validate
-  if (!/\{\{/.test(url) && !/@get:\{/.test(url)) return validate(raw, "详情目录地址", warnings);
+  if (!/\{\{/.test(url) && !/@get:\{/.test(url)) return validate(raw, label, warnings);
   if (templateIsSupported(url)) return raw;
-  warnings.push("详情目录地址需要 JS 求值，已忽略");
+  warnings.push(`${label}需要 JS 求值，已忽略`);
   return null;
 }
 
@@ -447,7 +452,22 @@ export function convertLegadoSource(raw: unknown): ConversionResult {
   if (typeof raw !== "object" || raw === null) {
     throw new LegadoConversionError("不是合法的书源对象");
   }
-  const source = raw as LegadoBookSource;
+  const source = { ...raw } as LegadoBookSource;
+  // 一些导出工具把规则分组又编码成 JSON 字符串，先还原再兼容扁平字段。
+  for (const key of ["ruleSearch", "ruleBookInfo", "ruleToc", "ruleContent", "ruleExplore"] as const) {
+    const value: unknown = source[key];
+    if (typeof value === "string") {
+      try {
+        const parsed: unknown = JSON5.parse(value);
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
+        source[key] = parsed;
+      } catch {
+        throw new LegadoConversionError(`${key} 不是合法规则对象`);
+      }
+    } else if (value && typeof value === "object") {
+      source[key] = { ...value };
+    }
+  }
   // 老版扁平格式先摊平成嵌套，后面的读取就不用管是哪一代格式了
   normalizeFlatSource(source);
   const name = clean(source.bookSourceName);
@@ -542,7 +562,7 @@ export function convertLegadoSource(raw: unknown): ConversionResult {
   const rawSearchUrl = clean(source.searchUrl);
   const searchUrlUsable = rawSearchUrl ? !needsJsEvaluation(rawSearchUrl) : false;
   if (rawSearchUrl && !searchUrlUsable) {
-    warnings.push("搜索地址需要 JS 求值，已禁用该源的搜索；目录与正文不受影响");
+    warnings.push("搜索地址含不支持的表达式或请求配置，已禁用该源的搜索；目录与正文不受影响");
   }
 
   /**
@@ -560,9 +580,11 @@ export function convertLegadoSource(raw: unknown): ConversionResult {
   const config: RulesConfig = {
     searchUrl: searchUrlUsable ? rawSearchUrl : null,
     searchList: validate(clean(source.ruleSearch?.bookList), "搜索列表", warnings),
-    searchName: validate(clean(source.ruleSearch?.name), "搜索结果书名", warnings),
+    searchName: validate(clean(source.ruleSearch?.name) ?? (clean(source.ruleSearch?.bookList) ? "text" : null), "搜索结果书名", warnings),
     searchAuthor: validate(clean(source.ruleSearch?.author), "搜索结果作者", warnings),
-    searchBookUrl: validate(clean(source.ruleSearch?.bookUrl), "搜索结果详情地址", warnings),
+    searchBookUrl: resolveTocUrlRule(clean(source.ruleSearch?.bookUrl) ?? (clean(source.ruleSearch?.bookList) ? "href" : null), warnings, "搜索结果详情地址"),
+    searchCover: resolveTocUrlRule(clean(source.ruleSearch?.coverUrl), warnings, "搜索结果封面"),
+    searchIntro: validate(clean(source.ruleSearch?.intro), "搜索结果简介", warnings),
     infoName: validate(clean(source.ruleBookInfo?.name), "详情书名", warnings),
     infoAuthor: validate(clean(source.ruleBookInfo?.author), "详情作者", warnings),
     infoIntro: validate(clean(source.ruleBookInfo?.intro), "详情简介", warnings),
@@ -625,7 +647,12 @@ export interface BatchConversionResult {
 export function parseLegadoJson(text: string): BatchConversionResult {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(text);
+    // 大清单通常是标准 JSON，先走原生快速解析，避免为兼容格式增加整批 CPU 开销。
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = JSON5.parse(text);
+    }
   } catch {
     throw new LegadoConversionError("不是合法 JSON");
   }
@@ -662,10 +689,5 @@ export function parseLegadoJson(text: string): BatchConversionResult {
  * 我们只取搜索结果首页，所以固定填 1。
  */
 export function buildSearchUrl(template: string, keyword: string, page = 1): string {
-  const encoded = encodeURIComponent(keyword);
-  return template
-    .replace(/\{\{\s*key\s*\}\}/gi, encoded)
-    .replace(/\{\{\s*searchKey\s*\}\}/gi, encoded)
-    .replace(/\{\{\s*page\s*\}\}/gi, String(page))
-    .replace(/searchKey/g, encoded);
+  return renderSearchUrl(template, keyword, page);
 }

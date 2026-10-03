@@ -108,6 +108,8 @@ export function toLegadoSource(source: ExportableSource): LegadoExport | null {
     name: config.searchName,
     author: config.searchAuthor,
     bookUrl: config.searchBookUrl,
+    coverUrl: config.searchCover,
+    intro: config.searchIntro,
   });
   out.ruleBookInfo = compact({
     name: config.infoName,

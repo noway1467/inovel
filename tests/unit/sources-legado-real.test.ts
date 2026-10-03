@@ -8,6 +8,7 @@ import {
 } from "~/server/sources/legado";
 import { canParseRule } from "~/server/sources/rule-expr";
 import { templateIsSupported } from "~/server/sources/url-options";
+import { supportsSearchRequest } from "~/server/sources/search-request";
 
 interface RawSource {
   bookSourceName?: string;
@@ -123,7 +124,8 @@ describe.skipIf(!hasFixture)("真实书源合集转换率", () => {
     for (const item of result.converted) {
       if (!item.config.searchUrl) continue;
       // 搜索地址不需要 JS，才会被保留
-      expect(item.config.searchUrl).not.toMatch(/java\.|source\.|cookie\./);
+      // 白名单内的 source.getKey()/java.encodeURI 只是纯数据操作，不执行任意宿主脚本。
+      expect(supportsSearchRequest(item.config.searchUrl)).toBe(true);
       if (item.config.searchList) {
         expect(canParseRule(item.config.searchList)).toBe(true);
       }

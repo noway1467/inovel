@@ -13,7 +13,8 @@ import {
   type VarStore,
 } from "~/server/sources/url-options";
 import { parseHtml } from "~/server/sources/html";
-import { buildSearchUrl, degradeJsRule, type RulesConfig } from "~/server/sources/legado";
+import { degradeJsRule, type RulesConfig } from "~/server/sources/legado";
+import { buildSearchRequest } from "~/server/sources/search-request";
 import { evalAjaxRule, isSupportedAjaxRule } from "~/server/sources/java-ajax";
 import {
   canParseRule,
@@ -255,16 +256,17 @@ async function loadResponse(
   url: string,
   /** 目录接口那类需要 POST + body 的请求，见 resolveTocUrl */
   init?: GuardedFetchInit
-): Promise<{ body: string; contentType: string; setCookie?: string | null }> {
+): Promise<{ body: string; contentType: string; url?: string; setCookie?: string | null }> {
   ctx.countRequest();
   const response = await guardedFetch(ctx.db, url, {
     headers: {
       ...sourceHeaders(ctx.config),
-      Accept: "text/html,application/json;q=0.9,*/*;q=0.8",
+      accept: "text/html,application/json;q=0.9,*/*;q=0.8",
       ...init?.headers,
     },
     ...(init?.method ? { method: init.method } : {}),
     ...(init?.body !== undefined ? { body: init.body } : {}),
+    ...(init?.charset ? { charset: init.charset } : {}),
   });
   if (!response.ok) throw new Error(response.message);
   if (response.result.status >= 400) throw new Error(`源返回 HTTP ${response.result.status}`);
@@ -291,19 +293,21 @@ async function loadDocRaw(
   ctx: Parameters<SourceAdapter["listBooks"]>[0],
   url: string,
   init?: GuardedFetchInit
-): Promise<{ doc: RuleDoc; body: string }> {
-  const { body, contentType } = await loadResponse(ctx, url, init);
+): Promise<{ doc: RuleDoc; body: string; url: string }> {
+  const response = await loadResponse(ctx, url, init);
+  const { body, contentType } = response;
+  const finalUrl = response.url ?? url;
   const trimmed = body.trimStart();
   const looksJson =
     contentType.includes("json") || trimmed.startsWith("{") || trimmed.startsWith("[");
   if (looksJson) {
     try {
-      return { doc: jsonDoc(JSON.parse(body)), body };
+      return { doc: jsonDoc(JSON.parse(body)), body, url: finalUrl };
     } catch {
       // 声明是 JSON 但解析失败时退回 HTML，比直接报错更宽容
     }
   }
-  return { doc: htmlDoc(parseHtml(body)), body };
+  return { doc: htmlDoc(parseHtml(body)), body, url: finalUrl };
 }
 
 /** 目录页可能与详情页不同，按 infoTocUrl 规则跳转一次 */
@@ -479,18 +483,36 @@ export const rulesAdapter: SourceAdapter = {
     if (!config.searchUrl || !config.searchList) {
       throw new Error("该源未配置搜索规则，请直接用详情页地址订阅");
     }
-    const url = resolveUrl(ctx.endpoint, buildSearchUrl(config.searchUrl, keyword));
-    const doc = await loadDoc(ctx, url);
-    const items = evalRuleNodes(doc, config.searchList);
+    const request = buildSearchRequest(
+      config.searchUrl, keyword, ctx.endpoint, sourceHeaders(ctx.config)
+    );
+    const { doc, url } = await loadDocRaw(ctx, request.url, request.options);
+    const items = evalRuleNodes(doc, usableRule(config.searchList) ?? config.searchList);
     const books: SourceBook[] = [];
+    const seen = new Set<string>();
+    const field = (item: RuleDoc, raw: string | null | undefined) => {
+      if (!raw) return "";
+      if (/\{\{\s*\$\./.test(raw)) {
+        return buildChapterUrlFromTemplate(raw, item, new Map()) ?? "";
+      }
+      const rule = usableRule(raw);
+      return rule ? evalRuleOne(item, rule) : "";
+    };
     for (const item of items) {
-      const bookUrl = config.searchBookUrl ? evalRuleOne(item, config.searchBookUrl) : "";
-      const title = config.searchName ? evalRuleOne(item, config.searchName) : "";
+      const bookUrl = field(item, config.searchBookUrl ?? "href");
+      const title = field(item, config.searchName ?? "text");
       if (!bookUrl || !title) continue;
+      const externalId = resolveUrl(url, bookUrl);
+      // 空/脚本链接不能作为可阅读书籍返回；真正抓取时仍需经过域名安全校验。
+      if (!/^https?:\/\//i.test(externalId) || seen.has(externalId)) continue;
+      seen.add(externalId);
+      const cover = field(item, config.searchCover);
       books.push({
-        externalId: resolveUrl(url, bookUrl),
+        externalId,
         title,
-        author: config.searchAuthor ? evalRuleOne(item, config.searchAuthor) || null : null,
+        author: field(item, config.searchAuthor) || null,
+        ...(config.searchCover ? { coverUrl: cover ? resolveUrl(url, cover) : null } : {}),
+        ...(config.searchIntro ? { description: field(item, config.searchIntro) || null } : {}),
       });
     }
     return books;

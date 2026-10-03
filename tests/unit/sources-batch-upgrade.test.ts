@@ -5,6 +5,7 @@ import { createDb, type AppDb } from "~/server/db";
 import { createSqliteD1 } from "../helpers/sqlite-d1";
 import { createSourceFixtures } from "../helpers/sources-fixtures";
 import { batchImportSources } from "~/server/sources/batch-import";
+import { currentConverterVersion } from "~/server/sources/legado";
 
 let db: AppDb;
 let raw: ReturnType<typeof createSqliteD1>["raw"];
@@ -48,7 +49,8 @@ describe("同地址书源配置升级", () => {
       endpoint: "https://upgrade.example.org/",
       status: "enabled",
       config: {
-        converterVersion: 0,
+        converterVersion: 4,
+        searchUrl: null,
         infoTocUrl: null,
         tocMode: "detect",
         tocList: null,
@@ -73,9 +75,10 @@ describe("同地址书源配置升级", () => {
       .all();
     expect(rows).toHaveLength(1);
     const config = rows[0]!.config as Record<string, unknown>;
-    expect(config.converterVersion).toBe(4);
+    expect(config.converterVersion).toBe(currentConverterVersion);
     expect(String(config.infoTocUrl)).toContain("/api/toc");
     expect(config.tocMode).toBe("rules");
+    expect(config.searchUrl).toBe(freshSource.searchUrl);
     expect(rows[0]!.status).toBe("enabled");
   });
 });
