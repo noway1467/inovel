@@ -14,6 +14,7 @@ import type { Route } from "./+types/reader";
 import { Button } from "~/components/ui/button";
 import { ReaderSettingsPanel } from "~/components/reader/reader-settings-panel";
 import { ReaderToc } from "~/components/reader/reader-toc";
+import { useChapterNavigation } from "~/components/reader/use-chapter-navigation";
 import {
   defaultReaderSettings,
   loadLocalProgress,
@@ -112,6 +113,7 @@ export default function ReaderPage({ loaderData }: Route.ComponentProps) {
   // 系统深浅色偏好，仅在 theme === "system" 时参与解析
   const [systemDark, setSystemDark] = useState(false);
   const navigate = useNavigate();
+  const { isChapterLoading, navigateChapter, onChapterLinkClick } = useChapterNavigation();
   const [settings, setSettings] = useState<ReaderSettings>(defaultReaderSettings);
   const [uiVisible, setUiVisible] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -367,12 +369,12 @@ export default function ReaderPage({ loaderData }: Route.ComponentProps) {
 
   const goPage = useCallback(
     (delta: number) => {
-      if (!isPaginated || turning) return;
+      if (!isPaginated || turning || isChapterLoading) return;
       if (delta > 0 && pageIndex >= turnCount - 1) {
         if (next) {
           if (turnTimer.current) clearTimeout(turnTimer.current);
           setTurning(false);
-          navigate(`/read/${bookId}/${next.id}`);
+          void navigateChapter(`/read/${bookId}/${next.id}`);
         }
         return;
       }
@@ -380,7 +382,7 @@ export default function ReaderPage({ loaderData }: Route.ComponentProps) {
         if (prev) {
           if (turnTimer.current) clearTimeout(turnTimer.current);
           setTurning(false);
-          navigate(`/read/${bookId}/${prev.id}`);
+          void navigateChapter(`/read/${bookId}/${prev.id}`);
         }
         return;
       }
@@ -408,8 +410,9 @@ export default function ReaderPage({ loaderData }: Route.ComponentProps) {
     },
     [
       bookId,
+      isChapterLoading,
       isPaginated,
-      navigate,
+      navigateChapter,
       next,
       pageAnchor,
       pageIndex,
@@ -420,6 +423,12 @@ export default function ReaderPage({ loaderData }: Route.ComponentProps) {
       turning,
     ]
   );
+
+  useEffect(() => {
+    // 工具栏也能在覆盖动画尚未结束时换章，旧计时器不能再写入新章页码。
+    if (turnTimer.current) clearTimeout(turnTimer.current);
+    setTurning(false);
+  }, [chapter.id]);
 
   useEffect(() => {
     return () => {
@@ -633,6 +642,7 @@ export default function ReaderPage({ loaderData }: Route.ComponentProps) {
       ref={mainRef}
       data-reader-theme={resolvedTheme}
       data-ui-visible={uiVisible ? "true" : "false"}
+      aria-busy={isChapterLoading}
       onTouchStart={onTouchStart}
       onTouchEnd={onTouchEnd}
       className="reader-surface relative flex h-dvh flex-col overflow-hidden"
@@ -820,7 +830,12 @@ export default function ReaderPage({ loaderData }: Route.ComponentProps) {
               没有相邻章时渲染真正的 disabled button，而不是套着 disabled 的 span。 */}
           {prev ? (
             <Button variant="ghost" size="sm" asChild>
-              <Link to={`/read/${bookId}/${prev.id}`} prefetch="intent">
+              <Link
+                to={`/read/${bookId}/${prev.id}`}
+                prefetch="intent"
+                aria-disabled={isChapterLoading}
+                onClick={onChapterLinkClick}
+              >
                 <ChevronLeft className="size-4" />
                 上一章
               </Link>
@@ -858,7 +873,12 @@ export default function ReaderPage({ loaderData }: Route.ComponentProps) {
           </div>
           {next ? (
             <Button variant="ghost" size="sm" asChild>
-              <Link to={`/read/${bookId}/${next.id}`} prefetch="intent">
+              <Link
+                to={`/read/${bookId}/${next.id}`}
+                prefetch="intent"
+                aria-disabled={isChapterLoading}
+                onClick={onChapterLinkClick}
+              >
                 下一章
                 <ChevronRight className="size-4" />
               </Link>
@@ -888,6 +908,17 @@ export default function ReaderPage({ loaderData }: Route.ComponentProps) {
       {/* 顺序阅读时下一章命中率极高，进页面就预取，翻到章末几乎瞬时。
           用 PrefetchPageLinks 而不是隐藏 Link：只产出 <link>，不往 DOM 里塞多余的 <a>。 */}
       {next && <PrefetchPageLinks page={`/read/${bookId}/${next.id}`} />}
+
+      {isChapterLoading && (
+        <div
+          role="status"
+          className="pointer-events-none absolute inset-x-0 top-1/2 z-40 text-center"
+        >
+          <span className="rounded-md bg-[var(--reader-bg)] px-3 py-2 shadow-lg">
+            正在加载章节…
+          </span>
+        </div>
+      )}
 
       {flash && (
         <div className="pointer-events-none absolute left-1/2 top-1/2 z-40 -translate-x-1/2 rounded-md bg-foreground px-3 py-2 text-sm text-background shadow-lg">

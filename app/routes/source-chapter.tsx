@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Link, redirect, useNavigate } from "react-router";
+import { Link, redirect } from "react-router";
 import {
   ArrowUpDown,
   BookmarkCheck,
@@ -17,6 +17,7 @@ import { ScrollArea } from "~/components/ui/scroll-area";
 import { Sheet, SheetBody, SheetContent, SheetHeader, SheetTitle } from "~/components/ui/sheet";
 import { EmptyState } from "~/components/state/empty-state";
 import { PagedText } from "~/components/reader/paged-text";
+import { useChapterNavigation } from "~/components/reader/use-chapter-navigation";
 import { ReaderSettingsPanel } from "~/components/reader/reader-settings-panel";
 import {
   defaultReaderSettings,
@@ -146,7 +147,7 @@ export function meta({ loaderData }: Route.MetaArgs) {
 
 export default function SourceChapterPage({ loaderData }: Route.ComponentProps) {
   const { chapter, nav, bookTitle, bookUrl, sourceId, error, preferences } = loaderData;
-  const navigate = useNavigate();
+  const { isChapterLoading, navigateChapter, onChapterLinkClick } = useChapterNavigation();
 
   const [settings, setSettings] = useState<ReaderSettings>(defaultReaderSettings);
   const [systemDark, setSystemDark] = useState(false);
@@ -395,6 +396,7 @@ export default function SourceChapterPage({ loaderData }: Route.ComponentProps) 
     <div
       data-reader-theme={resolvedTheme}
       data-ui-visible={uiVisible ? "true" : "false"}
+      aria-busy={isChapterLoading}
       className="reader-surface relative flex h-dvh flex-col overflow-hidden"
     >
       <style>{`html, body { background: var(--reader-bg); }`}</style>
@@ -478,15 +480,16 @@ export default function SourceChapterPage({ loaderData }: Route.ComponentProps) 
           sideInset={resolveSideInset(settings)}
           paragraphSpacing={settings.paragraphSpacing}
           allowCopy={settings.allowCopy}
+          disabled={isChapterLoading}
           pageIndex={pageIndex}
           onPageIndexChange={setPageIndex}
           onPaginationChange={setPagination}
           // 首页再往前 / 末页再往后时才跨章，与本地阅读器一致
           onOverflowPrev={() => {
-            if (nav?.prev) navigate(chapterLink(nav.prev));
+            if (nav?.prev) void navigateChapter(chapterLink(nav.prev));
           }}
           onOverflowNext={() => {
-            if (nav?.next) navigate(chapterLink(nav.next));
+            if (nav?.next) void navigateChapter(chapterLink(nav.next));
           }}
         />
       </main>
@@ -502,7 +505,11 @@ export default function SourceChapterPage({ loaderData }: Route.ComponentProps) 
           {isFirstPage ? (
             <Button size="sm" variant="ghost" disabled={!nav?.prev} asChild={Boolean(nav?.prev)}>
               {nav?.prev ? (
-                <Link to={chapterLink(nav.prev)}>
+                <Link
+                  to={chapterLink(nav.prev)}
+                  aria-disabled={isChapterLoading}
+                  onClick={onChapterLinkClick}
+                >
                   <ChevronLeft className="size-4" />
                   上一章
                 </Link>
@@ -514,7 +521,12 @@ export default function SourceChapterPage({ loaderData }: Route.ComponentProps) 
               )}
             </Button>
           ) : (
-            <Button size="sm" variant="ghost" onClick={() => setPageIndex((v) => v - 1)}>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={isChapterLoading}
+              onClick={() => setPageIndex((v) => v - 1)}
+            >
               <ChevronLeft className="size-4" />
               上一页
             </Button>
@@ -529,7 +541,11 @@ export default function SourceChapterPage({ loaderData }: Route.ComponentProps) 
           {isLastPage ? (
             <Button size="sm" variant="ghost" disabled={!nav?.next} asChild={Boolean(nav?.next)}>
               {nav?.next ? (
-                <Link to={chapterLink(nav.next)}>
+                <Link
+                  to={chapterLink(nav.next)}
+                  aria-disabled={isChapterLoading}
+                  onClick={onChapterLinkClick}
+                >
                   下一章
                   <ChevronRight className="size-4" />
                 </Link>
@@ -541,13 +557,29 @@ export default function SourceChapterPage({ loaderData }: Route.ComponentProps) 
               )}
             </Button>
           ) : (
-            <Button size="sm" variant="ghost" onClick={() => setPageIndex((v) => v + 1)}>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={isChapterLoading}
+              onClick={() => setPageIndex((v) => v + 1)}
+            >
               下一页
               <ChevronRight className="size-4" />
             </Button>
           )}
         </div>
       </footer>
+
+      {isChapterLoading && (
+        <div
+          role="status"
+          className="pointer-events-none absolute inset-x-0 top-1/2 z-40 text-center"
+        >
+          <span className="rounded-md bg-[var(--reader-bg)] px-3 py-2 shadow-lg">
+            正在加载章节…
+          </span>
+        </div>
+      )}
 
       <ReaderSettingsPanel
         open={settingsOpen}

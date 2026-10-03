@@ -40,6 +40,8 @@ export interface PagedTextProps {
    * 免得摘句子摘到一半被翻走。
    */
   allowCopy?: boolean;
+  /** 换章加载中保留旧正文，但不再消费翻页操作。 */
+  disabled?: boolean;
   /** 页数与当前页变化时回调，供外层渲染页码与上下页按钮 */
   onPaginationChange?: (state: { pageIndex: number; pageCount: number }) => void;
   /** 外层控制翻页用；受控值变化时跟随 */
@@ -59,6 +61,7 @@ export function PagedText({
   sideInset = "0.75rem",
   paragraphSpacing = 80,
   allowCopy = false,
+  disabled = false,
   pageIndex,
   pageCount: _ignored,
   onPageIndexChange,
@@ -123,21 +126,23 @@ export function PagedText({
   }, [pageIndex, pageCount, onPaginationChange]);
 
   const goPrev = useCallback(() => {
+    if (disabled) return;
     if (pageIndex > 0) {
       onPageIndexChange(pageIndex - 1);
       return;
     }
     // 已在首页：交给外层决定是否跳上一章
     onOverflowPrev?.();
-  }, [pageIndex, onPageIndexChange, onOverflowPrev]);
+  }, [disabled, pageIndex, onPageIndexChange, onOverflowPrev]);
 
   const goNext = useCallback(() => {
+    if (disabled) return;
     if (pageIndex < pageCount - 1) {
       onPageIndexChange(pageIndex + 1);
       return;
     }
     onOverflowNext?.();
-  }, [pageIndex, pageCount, onPageIndexChange, onOverflowNext]);
+  }, [disabled, pageIndex, pageCount, onPageIndexChange, onOverflowNext]);
 
   // 键盘与点击翻页
   useEffect(() => {
